@@ -47,6 +47,10 @@
             </div>
           </div>
 
+          <div class="feed-toolbar">
+            <div id="post-filters" class="post-filters" role="group" aria-label="按发布类型筛选"></div>
+            <p class="filter-note">筛选下方最新动态、历史和 Reset 提醒，不影响通知条件。</p>
+          </div>
           <article class="latest-panel" aria-label="Tibo 最新动态" aria-busy="true" data-state="loading" data-od-id="latest-post-card">
             <p class="panel-kicker">最新一条动态</p>
             <div class="post-author-row">
@@ -57,7 +61,7 @@
                 </span>
               </div>
               <div class="post-meta">
-                <span class="verified-mark">Tibo 本人发布</span>
+                <span class="timeline-kind" id="latest-type">正在识别类型</span>
                 <time class="post-time" id="latest-time">等待中</time>
               </div>
             </div>
@@ -88,6 +92,30 @@
           </div>
         </section>
 
+        <section class="timeline-section" aria-labelledby="timeline-heading" data-od-id="recent-posts-section">
+          <div class="section-heading">
+            <div>
+              <h2 id="timeline-heading">历史动态</h2>
+              <p class="section-description">完整原文，按时间排列。新旧记录统一分类，信息不足时标为待确认。</p>
+            </div>
+          </div>
+          <label class="history-range" for="history-range">时间范围
+            <select id="history-range" aria-controls="recent-posts-list">
+              <option value="all">全部可用历史</option>
+              <option value="recent">最近 3 天</option>
+            </select>
+          </label>
+          <div class="section-meta timeline-meta">
+            <span id="recent-post-count">正在读取最近动态</span>
+            <span class="muted">按发布时间从新到旧排列</span>
+          </div>
+          <div class="timeline-list" id="recent-posts-list" aria-live="polite" aria-busy="true" data-od-id="recent-posts-list">
+            <div class="skeleton-row"></div>
+            <div class="skeleton-row"></div>
+            <div class="skeleton-row short"></div>
+          </div>
+        </section>
+
         <section class="workbench" aria-labelledby="radar-heading" data-od-id="reset-alerts-section">
           <div class="section-heading">
             <div>
@@ -107,7 +135,7 @@
             <div class="alerts-column">
               <div class="section-meta">
                 <span id="alert-count">0 条 Reset 动态</span>
-                <span class="muted">都由 Tibo 本人发布</span>
+                <span class="muted">随上方分类筛选</span>
               </div>
               <div class="alert-list" id="alerts-list" aria-live="polite" aria-busy="true" data-od-id="alert-log">
                 <div class="skeleton-row"></div>
@@ -139,7 +167,7 @@
                   <dd id="retry-state">等待中</dd>
                 </div>
               </dl>
-              <p class="source-note">动态链接必须属于 <code>x.com/thsottiaux/status/&lt;id&gt;</code>。回复和引用帖也一样，只有 Tibo 本人发布的内容才会收录。</p>
+              <p class="source-note">仅收录 Tibo 本人发布的内容。回复自己的续帖归入“自己发帖”；未提供回复对象时单独注明。历史范围以数据源当前提供的记录为准。</p>
             </aside>
           </div>
         </section>

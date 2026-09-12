@@ -1,9 +1,14 @@
 const FEED_ENDPOINT = window.TIBO_RESET_WATCH_CONFIG?.feedEndpoint || "https://codex-reset.com/api/feed";
 const TIBO_HANDLE = "thsottiaux";
 const NORMAL_INTERVAL_MS = 120_000;
+const RECENT_HISTORY_MS = 3 * 24 * 60 * 60 * 1_000;
 const STORAGE_KEY = "tibo-reset-watch.web.v1";
+const POST_TYPES = { all: "全部动态", post: "自己发帖", reply: "回复他人", unknown: "类型待确认" };
 
 const refs = {
+  postFilters: document.getElementById("post-filters"),
+  historyRange: document.getElementById("history-range"),
+  latestType: document.getElementById("latest-type"),
   sourceIndicator: document.getElementById("source-indicator"),
   sourceState: document.getElementById("source-state"),
   checkNow: document.getElementById("check-now"),
@@ -17,6 +22,8 @@ const refs = {
   latestLink: document.getElementById("latest-link"),
   latestPostKind: document.getElementById("latest-post-kind"),
   latestPanel: document.querySelector(".latest-panel"),
+  recentPostCount: document.getElementById("recent-post-count"),
+  recentPostsList: document.getElementById("recent-posts-list"),
   alertMode: document.getElementById("alert-mode"),
   alertCount: document.getElementById("alert-count"),
   alertsList: document.getElementById("alerts-list"),
@@ -29,6 +36,8 @@ const refs = {
 };
 
 const state = {
+  postFilter: "all",
+  historyRange: "all",
   polling: false,
   failures: 0,
   timer: null,
@@ -126,6 +135,8 @@ function classify(post) {
 function readStoredState() {
   try {
     const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+    state.postFilter = Object.hasOwn(POST_TYPES, stored.postFilter) ? stored.postFilter : "all";
+    state.historyRange = stored.historyRange === "recent" ? "recent" : "all";
     state.primed = stored.primed === true;
     state.mode = stored.mode === "confirmedOnly" ? "confirmedOnly" : "possibleAndConfirmed";
     state.seen = new Set(Array.isArray(stored.seen) ? stored.seen : []);
@@ -135,12 +146,15 @@ function readStoredState() {
     state.seen = new Set();
   }
   refs.alertMode.value = state.mode;
+  refs.historyRange.value = state.historyRange;
 }
 
 function saveStoredState() {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
       primed: state.primed,
+      postFilter: state.postFilter,
+      historyRange: state.historyRange,
       mode: state.mode,
       seen: [...state.seen].slice(-200),
     }));
@@ -152,6 +166,10 @@ function saveStoredState() {
 function compactText(text, limit = 240) {
   const oneLine = String(text || "").replace(/\s+/g, " ").trim();
   return oneLine.length > limit ? `${oneLine.slice(0, limit - 1)}…` : oneLine;
+}
+
+function fullPostText(text) {
+  return String(text || "").trim() || "（此动态没有文本内容）";
 }
 
 function formatTime(value, fallback = "等待中") {
@@ -247,11 +265,51 @@ function validateSnapshot(snapshot) {
   return posts;
 }
 
+// 新旧记录统一按来源元数据分类，缺少依据时不从正文猜测。
+function postType(post) {
+  const target = typeof post.replying_to === "string" ? post.replying_to.trim().replace(/^@/, "") : "";
+  if (target.toLowerCase() === TIBO_HANDLE) return { type: "post", label: "自己发帖 · 续帖" };
+  if (target || post.is_reply === true || post.referenced_tweets?.some((item) => item.type === "replied_to")) {
+    return { type: "reply", label: target ? `回复 @${target}` : "回复 · 对象未提供" };
+  }
+  if (post.is_reply === false || Array.isArray(post.referenced_tweets)) return { type: "post", label: POST_TYPES.post };
+  return { type: "unknown", label: POST_TYPES.unknown };
+}
+
+function matchesPostFilter(post) {
+  return state.postFilter === "all" || postType(post).type === state.postFilter;
+}
+
+function createTypeBadge(post) {
+  const badge = document.createElement("span");
+  const kind = postType(post);
+  badge.className = "timeline-kind";
+  badge.dataset.type = kind.type;
+  badge.textContent = kind.label;
+  return badge;
+}
+
+function renderPostFilters() {
+  refs.postFilters.replaceChildren();
+  for (const [type, label] of Object.entries(POST_TYPES)) {
+    const count = state.posts.filter((post) => type === "all" || postType(post).type === type).length;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.dataset.filter = type;
+    button.className = "filter-button";
+    button.setAttribute("aria-pressed", String(state.postFilter === type));
+    button.setAttribute("aria-controls", "latest-text recent-posts-list alerts-list");
+    button.textContent = `${label} · ${count}`;
+    refs.postFilters.append(button);
+  }
+}
+
 function updateLatest(posts) {
-  const post = posts[0];
+  const post = posts.find(matchesPostFilter);
   if (!post) {
+    refs.latestType.textContent = POST_TYPES[state.postFilter];
     refs.latestTime.textContent = "等待中";
-    refs.latestText.textContent = "暂时还没有 Tibo 的动态。";
+    refs.latestText.textContent = "当前分类暂无动态，可切换其他分类。";
     refs.latestPostKind.textContent = "还没有新动态";
     refs.latestPostKind.dataset.level = "other";
     refs.latestLink.hidden = true;
@@ -260,8 +318,11 @@ function updateLatest(posts) {
   }
 
   const signal = classify(post);
+  const kind = postType(post);
+  refs.latestType.textContent = kind.label;
+  refs.latestType.dataset.type = kind.type;
   refs.latestTime.textContent = formatTime(post.at);
-  refs.latestText.textContent = compactText(post.text, 220);
+  refs.latestText.textContent = fullPostText(post.text);
   refs.latestPostKind.textContent = signal?.level === "confirmed"
     ? "已经确认重置"
     : signal?.level === "upcoming" ? "可能重置" : "普通动态";
@@ -269,6 +330,66 @@ function updateLatest(posts) {
   refs.latestLink.href = post.url;
   refs.latestLink.hidden = false;
   setLatestPanelState(signal?.level === "confirmed" ? "confirmed" : signal?.level === "upcoming" ? "possible" : "neutral");
+}
+
+function getRecentPosts(posts) {
+  const cutoff = Date.now() - RECENT_HISTORY_MS;
+  return posts
+    .filter((post) => {
+      const publishedAt = Date.parse(post.at);
+      return state.historyRange === "all" || (Number.isFinite(publishedAt) && publishedAt >= cutoff);
+    })
+    .sort((left, right) => Date.parse(right.at) - Date.parse(left.at));
+}
+
+function createRecentPostRow(post) {
+  const row = document.createElement("article");
+  row.className = "timeline-row";
+  const safeId = String(post.id || "unknown").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  row.dataset.odId = `recent-post-${safeId || "unknown"}`;
+
+  const meta = document.createElement("div");
+  meta.className = "timeline-post-meta";
+  const kind = createTypeBadge(post);
+  const time = document.createElement("time");
+  time.dateTime = post.at || "";
+  time.textContent = formatTime(post.at);
+  meta.append(kind, time);
+
+  const text = document.createElement("p");
+  text.className = "timeline-text";
+  text.textContent = fullPostText(post.text);
+
+  const link = document.createElement("a");
+  link.className = "timeline-link";
+  link.href = post.url;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  link.textContent = "打开原帖 ↗";
+
+  row.append(meta, text, link);
+  return row;
+}
+
+function renderRecentPosts() {
+  refs.recentPostsList.replaceChildren();
+  const recentPosts = getRecentPosts(state.posts).filter(matchesPostFilter);
+  refs.recentPostCount.textContent = `${POST_TYPES[state.postFilter]} · ${recentPosts.length} 条`;
+
+  if (recentPosts.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    const title = document.createElement("strong");
+    title.textContent = "当前范围暂无动态";
+    const body = document.createElement("span");
+    body.textContent = "可切换分类或时间范围；这里只展示数据源提供的记录。";
+    empty.append(title, body);
+    refs.recentPostsList.append(empty);
+  } else {
+    recentPosts.forEach((post) => refs.recentPostsList.append(createRecentPostRow(post)));
+  }
+
+  refs.recentPostsList.setAttribute("aria-busy", "false");
 }
 
 function updateSourceFacts(snapshot, posts) {
@@ -299,11 +420,11 @@ function createAlertRow(alert) {
   const time = document.createElement("time");
   time.dateTime = alert.post.at || "";
   time.textContent = formatTime(alert.post.at);
-  head.append(kind, time);
+  head.append(kind, createTypeBadge(alert.post), time);
 
   const text = document.createElement("p");
   text.className = "alert-text";
-  text.textContent = compactText(alert.post.text);
+  text.textContent = fullPostText(alert.post.text);
 
   const link = document.createElement("a");
   link.className = "alert-link";
@@ -318,9 +439,8 @@ function createAlertRow(alert) {
 
 function renderAlerts() {
   refs.alertsList.replaceChildren();
-  const visible = state.mode === "confirmedOnly"
-    ? state.alerts.filter((alert) => alert.level === "confirmed")
-    : state.alerts;
+  const visible = state.alerts.filter((alert) => matchesPostFilter(alert.post) &&
+    (state.mode !== "confirmedOnly" || alert.level === "confirmed"));
   refs.alertCount.textContent = `${visible.length} 条 Reset 动态`;
 
   if (visible.length === 0) {
@@ -406,13 +526,15 @@ async function poll() {
     const response = await fetch(FEED_ENDPOINT, { cache: "no-store" });
     if (!response.ok) throw new Error(`数据源返回 HTTP ${response.status}`);
     const snapshot = await response.json();
-    const posts = validateSnapshot(snapshot);
+    const posts = validateSnapshot(snapshot).sort((left, right) => String(right.at).localeCompare(String(left.at)));
     const alerts = posts.map(classify).filter(Boolean);
     state.posts = posts;
     state.alerts = alerts;
     state.failures = 0;
 
+    renderPostFilters();
     updateLatest(posts);
+    renderRecentPosts();
     updateSourceFacts(snapshot, posts);
     renderAlerts();
     setSourceState(`已读取 ${posts.length} 条 Tibo 动态`, "ok");
@@ -440,6 +562,7 @@ async function poll() {
     refs.retryState.textContent = `第 ${state.failures} 次读取失败`;
     refs.feedFreshness.textContent = "读取失败";
     refs.alertsList.setAttribute("aria-busy", "false");
+    refs.recentPostsList.setAttribute("aria-busy", "false");
     setLatestPanelState("error");
     setSourceState("暂时无法连接", "error");
     setError(`${error.message || "读取时出了点问题"}。系统将在 ${minutes} 分钟后重试。`);
@@ -454,6 +577,23 @@ async function poll() {
 function bind() {
   readStoredState();
   updateNotificationButton();
+  renderPostFilters();
+  refs.postFilters.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-filter]");
+    if (!button) return;
+    state.postFilter = button.dataset.filter;
+    saveStoredState();
+    renderPostFilters();
+    refs.postFilters.querySelector(`[data-filter="${state.postFilter}"]`).focus();
+    updateLatest(state.posts);
+    renderRecentPosts();
+    renderAlerts();
+  });
+  refs.historyRange.addEventListener("change", () => {
+    state.historyRange = refs.historyRange.value;
+    saveStoredState();
+    renderRecentPosts();
+  });
   state.countdownTimer = window.setInterval(updateCountdown, 1_000);
   refs.checkNow.addEventListener("click", () => poll());
   refs.enableNotifications.addEventListener("click", requestNotifications);

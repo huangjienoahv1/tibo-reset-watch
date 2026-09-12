@@ -11,6 +11,7 @@ Tibo Reset Watch polls a public reset feed every two minutes, classifies new pos
 - Shows a small menu-bar bell instead of keeping a browser tab open.
 - Accepts only canonical posts authored by `@thsottiaux`; other accounts and non-Tibo events are excluded.
 - Shows Tibo's latest accepted timeline post in the menu even when it is unrelated to resets.
+- Shows the complete text of accepted posts from the last three days in the web client and labels replies with their target account.
 - Separates **possible reset signals** from **confirmed resets**.
 - Silently establishes a baseline on first launch, so old posts are never replayed as alerts.
 - Lets a signal alert upgrade to a second confirmation alert for the same post.
@@ -122,3 +123,7 @@ GitHub Actions runs the macOS self-check, browser/worker checks, and a Windows i
 ## License
 
 This project is available under the [MIT License](LICENSE).
+
+### 动态分类与历史浏览
+
+顶部按钮支持全部动态、自己发帖、回复他人和类型待确认，同时筛选最新动态、历史动态和 Reset 提醒，不改变通知条件。历史支持全部可用历史与最近 3 天切换，并保留完整原文。新旧记录根据来源的回复标记、回复对象或引用关系分类；回复自己的续帖归入自己发帖，缺少依据的记录标为类型待确认，不根据正文猜测。历史仅限上游当前返回的记录，页面不额外归档。
