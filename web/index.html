@@ -3,8 +3,8 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#0d1415" media="(prefers-color-scheme: dark)" />
-    <meta name="theme-color" content="#f4f2ea" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#10191f" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#f3f6f9" media="(prefers-color-scheme: light)" />
     <meta name="color-scheme" content="dark light" />
     <meta name="description" content="只看 @thsottiaux 本人发布的动态。他提到 Codex reset 时，浏览器会提醒你。" />
     <meta property="og:title" content="Tibo Reset Watch" />
@@ -70,6 +70,7 @@
               <span class="post-kind" id="latest-post-kind">最新动态</span>
               <a class="text-link" id="latest-link" target="_blank" rel="noopener noreferrer" hidden>在 X 查看原帖 <span aria-hidden="true">↗</span></a>
             </div>
+            <div id="latest-cards" class="latest-cards"></div>
           </article>
         </section>
 
@@ -184,6 +185,7 @@
       </footer>
     </div>
     <script src="config.js"></script>
+    <script src="post-cards.js" defer></script>
     <script src="app.js" defer></script>
   </body>
 </html>

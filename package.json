@@ -8,8 +8,10 @@
   "scripts": {
     "start": "electron .",
     "windows:build": "electron-builder --win --x64 --publish never",
-    "web:check": "node --check web/config.js && node --check web/app.js && node --check web/sw.js",
+    "web:check": "node --check web/config.js && node --check web/app.js && node --check web/post-cards.js && node --check web/sw.js",
     "stream:check": "node --check server/stream-worker.cjs",
+    "web:serve": "node server/web-server.cjs",
+    "translation:check": "node --check server/web-server.cjs",
     "stream:start": "node server/stream-worker.cjs"
   },
   "devDependencies": {

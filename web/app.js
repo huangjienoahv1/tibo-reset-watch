@@ -8,6 +8,7 @@ const POST_TYPES = { all: "全部动态", post: "自己发帖", reply: "回复�
 const refs = {
   postFilters: document.getElementById("post-filters"),
   historyRange: document.getElementById("history-range"),
+  latestCards: document.getElementById("latest-cards"),
   latestType: document.getElementById("latest-type"),
   sourceIndicator: document.getElementById("source-indicator"),
   sourceState: document.getElementById("source-state"),
@@ -306,6 +307,7 @@ function renderPostFilters() {
 
 function updateLatest(posts) {
   const post = posts.find(matchesPostFilter);
+  refs.latestCards.replaceChildren();
   if (!post) {
     refs.latestType.textContent = POST_TYPES[state.postFilter];
     refs.latestTime.textContent = "等待中";
@@ -317,6 +319,7 @@ function updateLatest(posts) {
     return;
   }
 
+  refs.latestCards.append(window.TiboPostCards.create(post, postType(post)));
   const signal = classify(post);
   const kind = postType(post);
   refs.latestType.textContent = kind.label;
@@ -367,7 +370,7 @@ function createRecentPostRow(post) {
   link.rel = "noopener noreferrer";
   link.textContent = "打开原帖 ↗";
 
-  row.append(meta, text, link);
+  row.append(meta, text, link, window.TiboPostCards.create(post, postType(post)));
   return row;
 }
 
@@ -433,7 +436,7 @@ function createAlertRow(alert) {
   link.rel = "noopener noreferrer";
   link.textContent = "打开原帖 ↗";
 
-  row.append(head, text, link);
+  row.append(head, text, link, window.TiboPostCards.create(alert.post, postType(alert.post)));
   return row;
 }
 

@@ -127,3 +127,33 @@ This project is available under the [MIT License](LICENSE).
 ### 动态分类与历史浏览
 
 顶部按钮支持全部动态、自己发帖、回复他人和类型待确认，同时筛选最新动态、历史动态和 Reset 提醒，不改变通知条件。历史支持全部可用历史与最近 3 天切换，并保留完整原文。新旧记录根据来源的回复标记、回复对象或引用关系分类；回复自己的续帖归入自己发帖，缺少依据的记录标为类型待确认，不根据正文猜测。历史仅限上游当前返回的记录，页面不额外归档。
+
+## 双语内容卡片
+
+最新动态、历史动态和 Reset 提醒均提供“双语内容卡片”入口。展开后选择英文原文或中文与英文对照，可下载 PNG；长帖自动分页，每张标明页码、时间、发帖类型和原帖链接。卡片为文字排版，不是 X 页面截图，不包含原帖媒体。中文带机器翻译标识，并提供可复制的译文。
+
+中文支持公共翻译和 AI 翻译，由使用者在卡片内选择，不自动切换供应商。只有请求中文时才将该公开原文提交给所选服务。公共翻译使用 MyMemory，有每日额度及网络可用性限制；失败会显示原因，不把英文作为中文返回。AI 使用服务器配置的 Chat Completions 兼容接口。密钥不进入网页。
+
+部署完整功能需要 Node.js 22+，运行 `npm run web:serve`，默认地址为 `http://127.0.0.1:8788`。配置见 `server/translation.env.example`；环境变量由运行环境加载，该示例不会自动读取。静态托管仍可生成英文卡片，中文需要把 `web/config.js` 中 `translationEndpoint` 指向同源翻译服务（默认 `/api/translate`）；跨域 API 未开放。
+
+AI 配置项为 `AI_TRANSLATION_URL`（完整接口地址）、`AI_TRANSLATION_MODEL`、`AI_TRANSLATION_API_KEY`（支持无需密钥的内部接口）。配置后重启进程或重建容器。AI 未配置时选择该方式会提示使用公共翻译，不会伪造结果。
+
+翻译服务每次最多处理 24000 字节原文，公共服务按不超过 480 字节分段；总超时 55 秒，并发上限 2，每分钟最多发起 20 次新翻译。相同内容和供应商的并发请求合并，成功译文缓存最多 1000 条；配置 `TRANSLATION_CACHE_DIR` 可跨发布保留。缓存键包括原文和 AI 模型地址，失败不缓存。历史仅覆盖上游当前提供的原文。
+
+93 部署时运行 Node 容器提供静态页面和翻译 API，端口仍为 9093。私有配置文件使用 `/data/tibo-reset-watch/translation.env`，译文缓存使用 `/data/tibo-reset-watch/translations`，发布目录以只读方式挂载；升级时保留旧容器用于回滚。配置文件不要放在发布目录或 Git 仓库内。
+
+接口：`GET /api/translation-status` 返回公共服务支持情况与 AI 是否已配置；`POST /api/translate` 接收 `{ "text": "原文", "provider": "public 或 ai" }`，返回 `{ "text": "译文", "provider": "翻译来源" }`。额度/并发超限为 429，AI 未配置为 503，上游失败为 502，超时为 504。日志仅记录错误状态，不记录密钥或请求正文。
+
+参考：[MyMemory API](https://mymemory.translated.net/doc/spec.php)、[Chat Completions 接口](https://developers.openai.com/api/reference/resources/chat)。
+
+## Cloudflare Pages 免费托管
+
+Pages 版本独立提供网页和同源翻译 API，不调用 93 或云服务器上的服务。原 Node 部署仍可继续使用。
+
+当前访问地址：https://tibo-reset-watch.pages.dev/ 。公共翻译仍受 MyMemory 的供应商额度约束；本地或原服务器翻译成功不代表 Cloudflare 出口有剩余额度，耗尽时返回 429 并显示原因。
+
+在项目目录使用 PowerShell 7 执行 `pwsh.exe -File scripts/build-pages.ps1`，将输出的 ZIP 上传到 Cloudflare Pages 的“直接上传”。每次生成新的临时目录，不清理或覆盖已有发布包。包内只包含网页资产、`_worker.js`、`_routes.json` 和 `_headers`，不上传服务器配置或密钥。更新时在同一个 Pages 项目创建新部署，失败可通过控制台回滚。
+
+`cloudflare/worker.mjs` 适配现有 `/api/translate` 和 `/api/translation-status` 协议。静态资源不消耗函数调用额度；翻译 API 受 Workers 免费配额限制。公共翻译每次最多 45 个分段（每段最多 480 UTF-8 字节），超限明确报错、不截断原文，以适配免费运行时子请求上限。AI 配置项与 Node 版同名，在 Pages 设置中配置，密钥使用 Secret 类型；接口必须可从 Cloudflare 经 HTTPS 访问，配置后重新部署。
+
+成功译文使用单实例最多 1000 条的内存缓存，以及有效期一天、可能提前淘汰的 Cloudflare 边缘缓存。缓存不是持久归档，不同步现有服务器的翻译文件；边缘缓存读写失败会记录不含正文的错误标识，并保留正常翻译能力。并发上限 2、每分钟 20 次的限制及相同请求合并仅作用于单个 Worker 实例，不是全站严格限额。需要全站配额时应另行配置 Durable Objects 或平台限流。

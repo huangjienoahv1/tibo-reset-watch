@@ -2,6 +2,7 @@
 dist/
 dist-windows/
 node_modules/
+.wrangler/
 .DS_Store
 .env
 server/.env
