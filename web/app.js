@@ -1,4 +1,4 @@
-const FEED_ENDPOINT = window.TIBO_RESET_WATCH_CONFIG?.feedEndpoint || "https://codex-reset.com/api/feed";
+const FEED_ENDPOINT = window.TIBO_RESET_WATCH_CONFIG?.feedEndpoint || "/api/feed";
 const TIBO_HANDLE = "thsottiaux";
 const NORMAL_INTERVAL_MS = 120_000;
 const RECENT_HISTORY_MS = 3 * 24 * 60 * 60 * 1_000;
@@ -9,6 +9,7 @@ const refs = {
   postFilters: document.getElementById("post-filters"),
   historyRange: document.getElementById("history-range"),
   latestCards: document.getElementById("latest-cards"),
+  latestReplyContext: document.getElementById("latest-reply-context"),
   latestType: document.getElementById("latest-type"),
   sourceIndicator: document.getElementById("source-indicator"),
   sourceState: document.getElementById("source-state"),
@@ -16,6 +17,7 @@ const refs = {
   enableNotifications: document.getElementById("enable-notifications"),
   updatedMeta: document.getElementById("updated-meta"),
   sourceProvider: document.getElementById("source-provider"),
+  statusLive: document.getElementById("status-live"),
   feedFreshness: document.getElementById("feed-freshness"),
   nextCheck: document.getElementById("next-check"),
   latestTime: document.getElementById("latest-time"),
@@ -28,10 +30,7 @@ const refs = {
   alertMode: document.getElementById("alert-mode"),
   alertCount: document.getElementById("alert-count"),
   alertsList: document.getElementById("alerts-list"),
-  profileHandle: document.getElementById("profile-handle"),
-  sourceScope: document.getElementById("source-scope"),
   lastChecked: document.getElementById("last-checked"),
-  retryState: document.getElementById("retry-state"),
   errorBanner: document.getElementById("error-banner"),
   errorText: document.getElementById("error-text"),
 };
@@ -213,6 +212,12 @@ function sourcePresentation(snapshot) {
   if (source === "vps-push") {
     return { label: "公开数据源", cadence: "数据通常每 15 分钟更新" };
   }
+  if (source === "x-api") {
+    return { label: "Codex Reset 上游", cadence: "上游约每分钟发布，页面每 2 分钟读取" };
+  }
+  if (source === "fx-twitter-public") {
+    return { label: "X 公开时间线镜像", cadence: "页面每 2 分钟读取一次最新时间线" };
+  }
   return { label: snapshot.source || "公开数据源", cadence: "页面每 2 分钟检查一次" };
 }
 
@@ -235,6 +240,8 @@ function updateCountdown() {
 function setSourceState(text, status = "loading") {
   refs.sourceState.textContent = text;
   refs.sourceIndicator.dataset.state = status;
+  refs.statusLive.dataset.state = status;
+  refs.statusLive.lastChild.textContent = status === "ok" ? "正常运行" : status === "error" ? "连接异常" : "正在读取";
 }
 
 function setError(message = "") {
@@ -290,6 +297,57 @@ function createTypeBadge(post) {
   return badge;
 }
 
+function createReplyContext(post) {
+  const kind = postType(post);
+  if (kind.type !== "reply") return null;
+
+  const context = post.reply_context;
+  const root = document.createElement("aside");
+  root.className = "reply-context";
+  root.dataset.state = context?.text ? "ready" : "unavailable";
+
+  const heading = document.createElement("div");
+  heading.className = "reply-context-heading";
+  const label = document.createElement("span");
+  label.textContent = "被回复的原文";
+  const author = document.createElement("strong");
+  const handle = String(context?.author_handle || post.replying_to || "").replace(/^@/, "");
+  author.textContent = handle ? `@${handle}` : "原作者";
+  heading.append(label, author);
+
+  const text = document.createElement("blockquote");
+  text.textContent = context?.text || "原帖正文暂时无法读取，可直接查看被回复原帖。";
+  root.append(heading, text);
+
+  const tweetId = String(post.in_reply_to_tweet_id || "");
+  const fallbackUrl = /^\d+$/.test(tweetId) ? `https://x.com/i/status/${tweetId}` : "";
+  const url = context?.url || fallbackUrl;
+  if (url) {
+    const link = document.createElement("a");
+    link.href = url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = "查看被回复原帖 ↗";
+    root.append(link);
+  }
+  return root;
+}
+
+async function enrichReplyContexts(posts) {
+  await Promise.all(posts.map(async (post) => {
+    const tweetId = String(post.in_reply_to_tweet_id || "");
+    if (!/^\d+$/.test(tweetId) || post.reply_context) return;
+    try {
+      const response = await fetch(`/api/reply-context?id=${encodeURIComponent(tweetId)}`, { cache: "no-store" });
+      if (!response.ok) return;
+      const result = await response.json();
+      if (result.reply_context?.text) post.reply_context = result.reply_context;
+    } catch {
+      // 主 feed 已可用时，回复上下文补全失败不应阻断整页展示。
+    }
+  }));
+}
+
 function renderPostFilters() {
   refs.postFilters.replaceChildren();
   for (const [type, label] of Object.entries(POST_TYPES)) {
@@ -308,6 +366,7 @@ function renderPostFilters() {
 function updateLatest(posts) {
   const post = posts.find(matchesPostFilter);
   refs.latestCards.replaceChildren();
+  refs.latestReplyContext.replaceChildren();
   if (!post) {
     refs.latestType.textContent = POST_TYPES[state.postFilter];
     refs.latestTime.textContent = "等待中";
@@ -326,6 +385,8 @@ function updateLatest(posts) {
   refs.latestType.dataset.type = kind.type;
   refs.latestTime.textContent = formatTime(post.at);
   refs.latestText.textContent = fullPostText(post.text);
+  const replyContext = createReplyContext(post);
+  if (replyContext) refs.latestReplyContext.append(replyContext);
   refs.latestPostKind.textContent = signal?.level === "confirmed"
     ? "已经确认重置"
     : signal?.level === "upcoming" ? "可能重置" : "普通动态";
@@ -368,9 +429,12 @@ function createRecentPostRow(post) {
   link.href = post.url;
   link.target = "_blank";
   link.rel = "noopener noreferrer";
-  link.textContent = "打开原帖 ↗";
+  link.textContent = "查看 X 原帖 ↗";
 
-  row.append(meta, text, link, window.TiboPostCards.create(post, postType(post)));
+  const replyContext = createReplyContext(post);
+  row.append(meta, text);
+  if (replyContext) row.append(replyContext);
+  row.append(link, window.TiboPostCards.create(post, postType(post)));
   return row;
 }
 
@@ -400,10 +464,7 @@ function updateSourceFacts(snapshot, posts) {
   state.feedFetchedAt = snapshot.fetched_at || null;
   refs.sourceProvider.textContent = presentation.label;
   refs.feedFreshness.textContent = formatFreshness(state.feedFetchedAt);
-  refs.profileHandle.textContent = `@${snapshot.profile.handle}`;
-  refs.sourceScope.textContent = "Tibo 本人发布的动态";
   refs.lastChecked.textContent = formatCheckedTime();
-  refs.retryState.textContent = "连接正常";
   refs.updatedMeta.textContent = posts[0]?.at
     ? `最近一条发布于 ${formatTime(posts[0].at)}，${presentation.cadence}`
     : `暂时没有动态，${presentation.cadence}`;
@@ -434,9 +495,12 @@ function createAlertRow(alert) {
   link.href = alert.post.url;
   link.target = "_blank";
   link.rel = "noopener noreferrer";
-  link.textContent = "打开原帖 ↗";
+  link.textContent = "查看 X 原帖 ↗";
 
-  row.append(head, text, link, window.TiboPostCards.create(alert.post, postType(alert.post)));
+  const replyContext = createReplyContext(alert.post);
+  row.append(head, text);
+  if (replyContext) row.append(replyContext);
+  row.append(link, window.TiboPostCards.create(alert.post, postType(alert.post)));
   return row;
 }
 
@@ -530,6 +594,7 @@ async function poll() {
     if (!response.ok) throw new Error(`数据源返回 HTTP ${response.status}`);
     const snapshot = await response.json();
     const posts = validateSnapshot(snapshot).sort((left, right) => String(right.at).localeCompare(String(left.at)));
+    await enrichReplyContexts(posts);
     const alerts = posts.map(classify).filter(Boolean);
     state.posts = posts;
     state.alerts = alerts;
@@ -562,7 +627,6 @@ async function poll() {
     const delay = retryIntervalMs(state.failures);
     const minutes = Math.round(delay / 60_000);
     refs.lastChecked.textContent = formatCheckedTime();
-    refs.retryState.textContent = `第 ${state.failures} 次读取失败`;
     refs.feedFreshness.textContent = "读取失败";
     refs.alertsList.setAttribute("aria-busy", "false");
     refs.recentPostsList.setAttribute("aria-busy", "false");

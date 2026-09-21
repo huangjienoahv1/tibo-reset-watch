@@ -51,45 +51,56 @@
             <div id="post-filters" class="post-filters" role="group" aria-label="按发布类型筛选"></div>
             <p class="filter-note">筛选下方最新动态、历史和 Reset 提醒，不影响通知条件。</p>
           </div>
-          <article class="latest-panel" aria-label="Tibo 最新动态" aria-busy="true" data-state="loading" data-od-id="latest-post-card">
-            <p class="panel-kicker">最新一条动态</p>
-            <div class="post-author-row">
-              <div class="author-lockup">
-                <span>
-                  <strong>Tibo</strong>
-                  <small>@thsottiaux</small>
-                </span>
+          <div class="dashboard-grid">
+            <article class="latest-panel" aria-label="Tibo 最新动态" aria-busy="true" data-state="loading" data-od-id="latest-post-card">
+              <p class="panel-kicker">最新动态</p>
+              <div class="post-author-row">
+                <div class="author-lockup">
+                  <span class="author-avatar" aria-hidden="true">T</span>
+                  <span>
+                    <strong>Tibo</strong>
+                    <small>@thsottiaux</small>
+                  </span>
+                </div>
+                <div class="post-meta">
+                  <span class="timeline-kind" id="latest-type">正在识别类型</span>
+                  <time class="post-time" id="latest-time">等待中</time>
+                </div>
               </div>
-              <div class="post-meta">
-                <span class="timeline-kind" id="latest-type">正在识别类型</span>
-                <time class="post-time" id="latest-time">等待中</time>
+              <blockquote class="latest-text" id="latest-text">正在读取 Tibo 的动态…</blockquote>
+              <div id="latest-reply-context"></div>
+              <div class="latest-footer">
+                <span class="post-kind" id="latest-post-kind">最新动态</span>
+                <a class="text-link" id="latest-link" target="_blank" rel="noopener noreferrer" hidden>查看 X 原帖 <span aria-hidden="true">↗</span></a>
               </div>
-            </div>
-            <blockquote class="latest-text" id="latest-text">正在读取 Tibo 的动态…</blockquote>
-            <div class="latest-footer">
-              <span class="post-kind" id="latest-post-kind">最新动态</span>
-              <a class="text-link" id="latest-link" target="_blank" rel="noopener noreferrer" hidden>在 X 查看原帖 <span aria-hidden="true">↗</span></a>
-            </div>
-            <div id="latest-cards" class="latest-cards"></div>
-          </article>
-        </section>
+              <div id="latest-cards" class="latest-cards"></div>
+            </article>
 
-        <section class="monitor-strip" aria-label="检查状态" data-od-id="monitoring-status">
-          <div data-od-id="source-provider-status">
-            <span>数据来源</span>
-            <strong id="source-provider">正在连接</strong>
-          </div>
-          <div data-od-id="feed-freshness-status">
-            <span>数据更新时间</span>
-            <strong id="feed-freshness">等待中</strong>
-          </div>
-          <div data-od-id="monitor-target-status">
-            <span>监控对象</span>
-            <strong>@thsottiaux</strong>
-          </div>
-          <div data-od-id="next-check-status">
-            <span>下次检查</span>
-            <strong id="next-check">等待中</strong>
+            <aside class="status-panel" aria-labelledby="status-heading" data-od-id="monitoring-status">
+              <div class="status-panel-heading">
+                <h2 id="status-heading">数据源状态</h2>
+                <span class="status-live" id="status-live" data-state="loading"><span aria-hidden="true"></span>正在读取</span>
+              </div>
+              <dl class="status-facts">
+                <div>
+                  <dt>数据来源</dt>
+                  <dd id="source-provider">正在连接</dd>
+                </div>
+                <div>
+                  <dt>数据更新时间</dt>
+                  <dd id="feed-freshness">等待中</dd>
+                </div>
+                <div>
+                  <dt>最近检查</dt>
+                  <dd id="last-checked">等待中</dd>
+                </div>
+                <div>
+                  <dt>下次检查</dt>
+                  <dd id="next-check">等待中</dd>
+                </div>
+              </dl>
+              <p class="status-note">页面每 2 分钟读取最新快照；浏览器不会保存帖子历史。优先数据：<a href="https://codex-reset.com/" target="_blank" rel="noopener noreferrer">codex-reset.com</a>。</p>
+            </aside>
           </div>
         </section>
 
@@ -97,7 +108,7 @@
           <div class="section-heading">
             <div>
               <h2 id="timeline-heading">历史动态</h2>
-              <p class="section-description">完整原文，按时间排列。新旧记录统一分类，信息不足时标为待确认。</p>
+              <p class="section-description">按时间倒序查看公开动态；回复内容会连同被回复原文一起显示。</p>
             </div>
           </div>
           <label class="history-range" for="history-range">时间范围
@@ -144,32 +155,6 @@
                 <div class="skeleton-row short"></div>
               </div>
             </div>
-
-            <aside class="source-panel" aria-labelledby="source-heading" data-od-id="source-policy">
-              <div class="source-panel-heading">
-                <p class="panel-label">@thsottiaux</p>
-                <h2 id="source-heading">监测范围</h2>
-              </div>
-              <dl class="source-facts">
-                <div>
-                  <dt>账号</dt>
-                  <dd id="profile-handle">等待中</dd>
-                </div>
-                <div>
-                  <dt>内容范围</dt>
-                  <dd id="source-scope">等待中</dd>
-                </div>
-                <div>
-                  <dt>最近检查</dt>
-                  <dd id="last-checked">等待中</dd>
-                </div>
-                <div>
-                  <dt>连接状态</dt>
-                  <dd id="retry-state">等待中</dd>
-                </div>
-              </dl>
-              <p class="source-note">仅收录 Tibo 本人发布的内容。回复自己的续帖归入“自己发帖”；未提供回复对象时单独注明。历史范围以数据源当前提供的记录为准。</p>
-            </aside>
           </div>
         </section>
 
@@ -181,7 +166,6 @@
 
       <footer class="footer" data-od-id="page-footer">
         <span>浏览器只在本地保存提醒偏好和已读记录</span>
-        <a href="https://github.com/Chloride233/tibo-reset-watch" target="_blank" rel="noopener noreferrer">GitHub ↗</a>
       </footer>
     </div>
     <script src="config.js"></script>

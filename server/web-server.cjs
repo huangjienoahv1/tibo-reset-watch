@@ -14,8 +14,18 @@ const PUBLIC_SEGMENT_BYTES = 480;
 const MAX_CONCURRENT = 2;
 const REQUESTS_PER_MINUTE = 20;
 const TIMEOUT_MS = 55000;
+const FEED_TIMEOUT_MS = 20000;
+const FEED_CACHE_TTL_MS = 60 * 1000;
+const FEED_POST_LIMIT = 20;
+const REPLY_CONTEXT_CACHE_LIMIT = 500;
+const REPLY_CONTEXT_SUCCESS_TTL_MS = 6 * 60 * 60 * 1000;
+const REPLY_CONTEXT_FAILURE_TTL_MS = 15 * 60 * 1000;
 const cache = new Map();
 const pending = new Map();
+const replyContextCache = new Map();
+const pendingReplyContexts = new Map();
+let feedCache = null;
+let pendingFeed = null;
 let requestTimes = [];
 const aiReady = Boolean(process.env.AI_TRANSLATION_URL && process.env.AI_TRANSLATION_MODEL);
 const aiIdentity = [process.env.AI_TRANSLATION_URL, process.env.AI_TRANSLATION_MODEL].join("|");
@@ -25,6 +35,227 @@ function fault(status, message) { return Object.assign(new Error(message), { sta
 function json(response, status, value) {
   response.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
   response.end(JSON.stringify(value));
+}
+
+function decodeHtml(value) {
+  const entities = {
+    amp: "&", apos: "'", gt: ">", lt: "<", nbsp: " ", quot: '"',
+  };
+  return String(value || "").replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (match, entity) => {
+    if (entity[0] === "#") {
+      const radix = entity[1]?.toLowerCase() === "x" ? 16 : 10;
+      const code = Number.parseInt(entity.slice(radix === 16 ? 2 : 1), radix);
+      return Number.isFinite(code) ? String.fromCodePoint(code) : match;
+    }
+    return entities[entity.toLowerCase()] ?? match;
+  });
+}
+
+function oEmbedText(html) {
+  const paragraph = String(html || "").match(/<p\b[^>]*>([\s\S]*?)<\/p>/i)?.[1];
+  if (!paragraph) throw new Error("missing tweet text");
+  return decodeHtml(paragraph
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<a\b[^>]*>([\s\S]*?)<\/a>/gi, "$1")
+    .replace(/<[^>]+>/g, ""))
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function rememberReplyContext(tweetId, value, ttlMs) {
+  replyContextCache.delete(tweetId);
+  replyContextCache.set(tweetId, { expiresAt: Date.now() + ttlMs, value });
+  while (replyContextCache.size > REPLY_CONTEXT_CACHE_LIMIT) {
+    replyContextCache.delete(replyContextCache.keys().next().value);
+  }
+}
+
+function validateReplyContext(value, tweetId) {
+  if (String(value.id) !== tweetId || typeof value.text !== "string" || !value.text.trim()) {
+    throw new Error("invalid reply context");
+  }
+  const url = new URL(value.url);
+  const pathParts = url.pathname.split("/").filter(Boolean);
+  if (!["x.com", "www.x.com", "twitter.com", "www.twitter.com"].includes(url.hostname.toLowerCase()) ||
+      pathParts[1]?.toLowerCase() !== "status" || pathParts[2] !== tweetId) {
+    throw new Error("invalid reply context URL");
+  }
+  return { ...value, text: value.text.trim(), url: url.toString() };
+}
+
+async function fxTwitterReplyContext(tweetId) {
+  const response = await fetch(`https://api.fxtwitter.com/status/${tweetId}`, {
+    headers: { Accept: "application/json" },
+    signal: AbortSignal.timeout(FEED_TIMEOUT_MS),
+  });
+  if (!response.ok) throw new Error(`FxTwitter HTTP ${response.status}`);
+  const result = await response.json();
+  const tweet = result.tweet;
+  return validateReplyContext({
+    id: tweet?.id,
+    text: tweet?.text,
+    author_name: String(tweet?.author?.name || "").trim(),
+    author_handle: String(tweet?.author?.screen_name || "").replace(/^@/, ""),
+    url: tweet?.url,
+    source: "fxtwitter",
+  }, tweetId);
+}
+
+function validateFeedSnapshot(snapshot) {
+  if (!snapshot || snapshot.source_scope !== "timeline" ||
+      String(snapshot.profile?.handle || "").toLowerCase() !== "thsottiaux" ||
+      !Array.isArray(snapshot.tweets)) {
+    throw new Error("invalid Tibo feed snapshot");
+  }
+  return snapshot;
+}
+
+async function primaryFeedSnapshot() {
+  const response = await fetch("https://codex-reset.com/api/feed", {
+    headers: {
+      Accept: "application/json",
+      "User-Agent": "tibo-reset-watch/0.3 (+http://39.98.37.208:9104)",
+    },
+    signal: AbortSignal.timeout(FEED_TIMEOUT_MS),
+  });
+  if (!response.ok) throw new Error(`upstream feed HTTP ${response.status}`);
+  return validateFeedSnapshot(await response.json());
+}
+
+function normalizedFxPost(status, contexts) {
+  const replyingTo = status.replying_to;
+  const replyId = String(replyingTo?.status || "");
+  const parent = contexts.get(replyId);
+  let replyContext = null;
+  if (parent) {
+    try {
+      replyContext = validateReplyContext({
+        id: parent.id,
+        text: parent.text,
+        author_name: parent.author?.name,
+        author_handle: parent.author?.screen_name,
+        url: parent.url,
+        source: "fxtwitter",
+      }, replyId);
+    } catch {
+      replyContext = null;
+    }
+  }
+  return {
+    id: String(status.id),
+    url: status.url,
+    text: String(status.text || ""),
+    at: new Date(Number(status.created_timestamp) * 1000).toISOString(),
+    is_reply: Boolean(replyId),
+    replying_to: replyingTo?.screen_name || null,
+    in_reply_to_tweet_id: replyId || null,
+    conversation_id: replyId || String(status.id),
+    replies: Number(status.replies || 0),
+    reposts: Number(status.reposts || 0),
+    likes: Number(status.likes || 0),
+    ...(replyContext ? { reply_context: replyContext } : {}),
+  };
+}
+
+async function fxTwitterFeedSnapshot() {
+  const url = "https://api.fxtwitter.com/2/profile/thsottiaux/statuses?count=50&with_replies=true";
+  const response = await fetch(url, {
+    headers: { Accept: "application/json" },
+    signal: AbortSignal.timeout(FEED_TIMEOUT_MS),
+  });
+  if (!response.ok) throw new Error(`FxTwitter timeline HTTP ${response.status}`);
+  const result = await response.json();
+  const statuses = Array.isArray(result.results)
+    ? result.results.filter((item) => item?.type === "status" && /^\d+$/.test(String(item.id)))
+    : [];
+  const contexts = new Map(statuses.map((item) => [String(item.id), item]));
+  const ownStatuses = statuses
+    .filter((item) => String(item.author?.screen_name || "").toLowerCase() === "thsottiaux")
+    .slice(0, FEED_POST_LIMIT);
+  if (ownStatuses.length === 0) throw new Error("FxTwitter timeline returned no Tibo posts");
+  const tweets = ownStatuses.map((item) => normalizedFxPost(item, contexts));
+  const fetchedAt = new Date().toISOString();
+  return validateFeedSnapshot({
+    version: 1,
+    fetched_at: fetchedAt,
+    source: "fx-twitter-public",
+    source_scope: "timeline",
+    stale: false,
+    newest_post_at: tweets[0]?.at || null,
+    profile: {
+      handle: "thsottiaux",
+      name: ownStatuses[0]?.author?.name || "Tibo",
+      followers: Number(ownStatuses[0]?.author?.followers || 0),
+    },
+    tweets,
+  });
+}
+
+// 页面只读取同源接口：优先保持原 feed 合同，受 Cloudflare 阻断时切到公开 X 时间线镜像。
+async function feedSnapshot() {
+  if (feedCache?.expiresAt > Date.now()) return feedCache.value;
+  if (pendingFeed) return pendingFeed;
+  pendingFeed = (async () => {
+    let value;
+    try {
+      value = await primaryFeedSnapshot();
+    } catch (primaryError) {
+      console.warn("primary_feed_unavailable", primaryError.message);
+      value = await fxTwitterFeedSnapshot();
+    }
+    feedCache = { expiresAt: Date.now() + FEED_CACHE_TTL_MS, value };
+    return value;
+  })();
+  try { return await pendingFeed; } finally { pendingFeed = null; }
+}
+
+async function oEmbedReplyContext(tweetId, post) {
+  const url = new URL("https://publish.twitter.com/oembed");
+  url.searchParams.set("url", `https://x.com/i/status/${tweetId}`);
+  url.searchParams.set("omit_script", "1");
+  url.searchParams.set("dnt", "1");
+  const response = await fetch(url, { signal: AbortSignal.timeout(FEED_TIMEOUT_MS) });
+  if (!response.ok) throw new Error(`oEmbed HTTP ${response.status}`);
+  const result = await response.json();
+  const authorUrl = new URL(result.author_url || `https://x.com/${post.replying_to || "i"}`);
+  return validateReplyContext({
+    id: tweetId,
+    text: oEmbedText(result.html),
+    author_name: String(result.author_name || post.replying_to || "").trim(),
+    author_handle: authorUrl.pathname.split("/").filter(Boolean)[0] || String(post.replying_to || "").replace(/^@/, ""),
+    url: result.url || `https://x.com/i/status/${tweetId}`,
+    source: "x-oembed",
+  }, tweetId);
+}
+
+// 上游 feed 只提供被回复帖 ID；优先读取 208 可访问的公开 JSON，失败时回退 X 官方 oEmbed。
+async function replyContext(post) {
+  const tweetId = String(post.in_reply_to_tweet_id || "");
+  if (!/^\d+$/.test(tweetId)) return null;
+  const cached = replyContextCache.get(tweetId);
+  if (cached?.expiresAt > Date.now()) return cached.value;
+  if (pendingReplyContexts.has(tweetId)) return pendingReplyContexts.get(tweetId);
+
+  const work = (async () => {
+    try {
+      let value;
+      try {
+        value = await fxTwitterReplyContext(tweetId);
+      } catch (primaryError) {
+        console.warn("reply_context_primary_unavailable", tweetId, primaryError.message);
+        value = await oEmbedReplyContext(tweetId, post);
+      }
+      rememberReplyContext(tweetId, value, REPLY_CONTEXT_SUCCESS_TTL_MS);
+      return value;
+    } catch (error) {
+      console.warn("reply_context_unavailable", tweetId, error.message);
+      rememberReplyContext(tweetId, null, REPLY_CONTEXT_FAILURE_TTL_MS);
+      return null;
+    }
+  })();
+  pendingReplyContexts.set(tweetId, work);
+  try { return await work; } finally { pendingReplyContexts.delete(tweetId); }
 }
 
 // 成功译文持久化到独立目录，键包含内容、供应商和模型；失败不写缓存。
@@ -133,8 +364,15 @@ async function translate(input) {
 
 const server = http.createServer(async (request, response) => {
   try {
-    const pathname = new URL(request.url, "http://localhost").pathname;
+    const requestUrl = new URL(request.url, "http://localhost");
+    const pathname = requestUrl.pathname;
     if (request.method === "GET" && pathname === "/api/translation-status") return json(response, 200, { public: true, ai: aiReady });
+    if (request.method === "GET" && pathname === "/api/feed") return json(response, 200, await feedSnapshot());
+    if (request.method === "GET" && pathname === "/api/reply-context") {
+      const tweetId = requestUrl.searchParams.get("id") || "";
+      if (!/^\d+$/.test(tweetId)) throw fault(400, "被回复帖 ID 无效。");
+      return json(response, 200, { reply_context: await replyContext({ in_reply_to_tweet_id: tweetId }) });
+    }
     if (request.method === "POST" && pathname === "/api/translate") {
       if (request.headers.origin && new URL(request.headers.origin).host !== request.headers.host) throw fault(403, "不允许跨站翻译请求。");
       if (!request.headers["content-type"]?.startsWith("application/json")) throw fault(415, "请使用 JSON 请求。");
@@ -157,10 +395,10 @@ const server = http.createServer(async (request, response) => {
     response.end(request.method === "HEAD" ? undefined : content);
   } catch (error) {
     const status = error.status || (error.name === "TimeoutError" ? 504 : 502);
-    console.warn("translation_request_failed", status);
-    if (!response.headersSent) json(response, status, { error: error.status ? error.message : "翻译服务暂不可用或超时，请稍后重试。" });
+    console.warn("web_request_failed", request.url, status);
+    if (!response.headersSent) json(response, status, { error: error.status ? error.message : "服务暂不可用或超时，请稍后重试。" });
     else response.end();
   }
 });
 server.requestTimeout = TIMEOUT_MS + 5000;
-server.listen(PORT, HOST, () => console.log(`Tibo web/translation server listening on ${HOST}:${PORT}`));
+server.listen(PORT, HOST, () => console.log(`Tibo web server listening on ${HOST}:${PORT}`));

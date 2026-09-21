@@ -1,4 +1,4 @@
-const CACHE_NAME = "tibo-reset-watch-shell-v8";
+const CACHE_NAME = "tibo-reset-watch-shell-v9";
 const SHELL = ["./", "./index.html", "./styles.css", "./config.js", "./app.js", "./post-cards.js", "./favicon.svg", "./manifest.webmanifest"];
 
 self.addEventListener("install", (event) => {

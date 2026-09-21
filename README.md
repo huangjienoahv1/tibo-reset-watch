@@ -11,7 +11,7 @@ Tibo Reset Watch polls a public reset feed every two minutes, classifies new pos
 - Shows a small menu-bar bell instead of keeping a browser tab open.
 - Accepts only canonical posts authored by `@thsottiaux`; other accounts and non-Tibo events are excluded.
 - Shows Tibo's latest accepted timeline post in the menu even when it is unrelated to resets.
-- Shows the complete text of accepted posts from the last three days in the web client and labels replies with their target account.
+- Shows complete accepted posts in the web client and, when available, includes the public text of the post that Tibo replied to.
 - Separates **possible reset signals** from **confirmed resets**.
 - Silently establishes a baseline on first launch, so old posts are never replayed as alerts.
 - Lets a signal alert upgrade to a second confirmation alert for the same post.
@@ -61,7 +61,7 @@ open "dist/Tibo Reset Watch.app"
 
 ### Web / PWA
 
-The browser client has no build step and reads the public feed directly. You can try the hosted client at <https://chloride233.github.io/tibo-reset-watch/>. Browser notifications are optional and only fire while the page is open.
+The browser client has no build step and reads the public feed directly. When served by the Node web server, it uses the same-origin `/api/reply-context` endpoint to enrich replies from a public X JSON mirror, with X oEmbed as a fallback. Browser notifications are optional and only fire while the page is open.
 
 For local development:
 
@@ -88,9 +88,9 @@ npm run windows:build
 
 ## Data source and limitations
 
-The current source is the independent public endpoint at <https://codex-reset.com/api/feed>, not an OpenAI or X API. The app requires the payload to identify itself as the `thsottiaux` timeline, then accepts only canonical URLs shaped like `x.com/thsottiaux/status/<same-id>`. Tibo's replies and quote-posts qualify when he authored their canonical status URL; posts authored by OpenAI, OpenAI Status, or community accounts do not.
+The Node service exposes a same-origin `/api/feed`: it first reads the independent public endpoint at <https://codex-reset.com/api/feed>, and falls back to the public FxTwitter timeline API when that endpoint is blocked or unavailable. Neither source is an official OpenAI or X API. The app requires the payload to identify itself as the `thsottiaux` timeline, then accepts only canonical URLs shaped like `x.com/thsottiaux/status/<same-id>`. Tibo's replies and quote-posts qualify when he authored their canonical status URL; posts authored by OpenAI, OpenAI Status, or community accounts do not.
 
-The upstream service says it syncs about every 15 minutes, so this is not a real-time X stream. If the feed is stale, unavailable, or fails the author checks, the app does not invent an alert. Treat the original X post and your Codex client as the source of truth.
+The primary upstream publishes refreshed copies about once a minute; the FxTwitter fallback reads the current public timeline. This is still not an official real-time X stream. The page requests the server snapshot every two minutes, the server keeps a successful feed snapshot in memory for one minute, and neither side archives post history. The Node service keeps successfully resolved reply context in memory for six hours (and failed lookups for fifteen minutes) to avoid repeatedly calling X; all of these caches disappear when the service restarts. If every feed source is unavailable or fails the author checks, the app does not invent an alert. Treat the original X post and your Codex client as the source of truth.
 
 This project is independent and is not affiliated with OpenAI, X, or Thibault “Tibo” Sottiaux.
 
@@ -126,11 +126,11 @@ This project is available under the [MIT License](LICENSE).
 
 ### 动态分类与历史浏览
 
-顶部按钮支持全部动态、自己发帖、回复他人和类型待确认，同时筛选最新动态、历史动态和 Reset 提醒，不改变通知条件。历史支持全部可用历史与最近 3 天切换，并保留完整原文。新旧记录根据来源的回复标记、回复对象或引用关系分类；回复自己的续帖归入自己发帖，缺少依据的记录标为类型待确认，不根据正文猜测。历史仅限上游当前返回的记录，页面不额外归档。
+顶部按钮支持全部动态、自己发帖、回复他人和类型待确认，同时筛选最新动态、历史动态和 Reset 提醒，不改变通知条件。历史支持全部可用历史与最近 3 天切换，并保留完整原文。新旧记录根据来源的回复标记、回复对象或引用关系分类；回复自己的续帖归入自己发帖，缺少依据的记录标为类型待确认，不根据正文猜测。回复他人时，Node 服务通过公开 X JSON 镜像补充被回复原文，并以 X oEmbed 作为备用来源；获取失败时页面明确提示，不伪造内容。历史仅限上游当前返回的记录，页面不额外归档。
 
 ## 双语内容卡片
 
-最新动态、历史动态和 Reset 提醒均提供“双语内容卡片”入口。展开后选择英文原文或中文与英文对照，可下载 PNG；长帖自动分页，每张标明页码、时间、发帖类型和原帖链接。卡片为文字排版，不是 X 页面截图，不包含原帖媒体。中文带机器翻译标识，并提供可复制的译文。
+最新动态、历史动态和 Reset 提醒均提供“生成分享图”入口。展开后选择英文原文或中文与英文对照，可下载 PNG；长帖自动分页，图片保留时间、发帖类型和正文，回复类动态还会同时带上被回复的原文。图片不再显示原帖 URL、页码说明和翻译来源等底部元信息。卡片为文字排版，不是 X 页面截图，不包含原帖媒体。中文带机器翻译标识，并提供可复制的译文。
 
 中文支持公共翻译和 AI 翻译，由使用者在卡片内选择，不自动切换供应商。只有请求中文时才将该公开原文提交给所选服务。公共翻译使用 MyMemory，有每日额度及网络可用性限制；失败会显示原因，不把英文作为中文返回。AI 使用服务器配置的 Chat Completions 兼容接口。密钥不进入网页。
 
@@ -141,6 +141,24 @@ AI 配置项为 `AI_TRANSLATION_URL`（完整接口地址）、`AI_TRANSLATION_M
 翻译服务每次最多处理 24000 字节原文，公共服务按不超过 480 字节分段；总超时 55 秒，并发上限 2，每分钟最多发起 20 次新翻译。相同内容和供应商的并发请求合并，成功译文缓存最多 1000 条；配置 `TRANSLATION_CACHE_DIR` 可跨发布保留。缓存键包括原文和 AI 模型地址，失败不缓存。历史仅覆盖上游当前提供的原文。
 
 93 部署时运行 Node 容器提供静态页面和翻译 API，端口仍为 9093。私有配置文件使用 `/data/tibo-reset-watch/translation.env`，译文缓存使用 `/data/tibo-reset-watch/translations`，发布目录以只读方式挂载；升级时保留旧容器用于回滚。配置文件不要放在发布目录或 Git 仓库内。
+
+208 部署使用 systemd 管理 Node 服务，当前公开端口为 9104。在 Windows 项目目录中使用 PowerShell 7 运行 `pwsh.exe -File scripts/deploy-208.ps1` 即可一键更新。脚本复用本机专用 SSH 密钥，先执行本地语法和差异检查，再把明确列出的运行文件上传到 `/data/tibo-reset-watch/releases/` 新版本目录；通过 SHA-256 校验后原子切换 `/data/tibo-reset-watch/current` 并重启服务。服务器本机健康检查失败时自动恢复旧版本。`translation.env`、翻译缓存和 Node 运行时位于发布目录之外，不会被更新包覆盖。脚本只适用于已经完成首次安装的 208 服务器；如果免密私钥放在其他位置，可通过 `-IdentityFile` 指定。
+
+日常更新可以直接双击项目根目录的 `deploy-208.cmd`，窗口会保留部署结果和错误信息。命令行调用方式如下：
+
+```bat
+deploy-208.cmd
+```
+
+```powershell
+pwsh.exe -File scripts/deploy-208.ps1
+```
+
+仅检查本地代码、打包过程和部署脚本语法，不连接服务器时使用：
+
+```powershell
+pwsh.exe -File scripts/deploy-208.ps1 -ValidateOnly
+```
 
 接口：`GET /api/translation-status` 返回公共服务支持情况与 AI 是否已配置；`POST /api/translate` 接收 `{ "text": "原文", "provider": "public 或 ai" }`，返回 `{ "text": "译文", "provider": "翻译来源" }`。额度/并发超限为 429，AI 未配置为 503，上游失败为 502，超时为 504。日志仅记录错误状态，不记录密钥或请求正文。
 
