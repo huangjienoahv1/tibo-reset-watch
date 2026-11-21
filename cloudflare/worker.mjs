@@ -1,4 +1,7 @@
+import { createFeedService } from "../server/feed-service.mjs";
+
 // Pages 独立入口：沿用现有翻译协议，不依赖原云服务器或本地磁盘。
+const feedSnapshot = createFeedService();
 const MAX_TEXT_BYTES = 24000;
 const MAX_BODY_BYTES = MAX_TEXT_BYTES * 2;
 const SEGMENT_BYTES = 480;
@@ -159,7 +162,10 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     try {
+      if (url.pathname === "/api/feed" && request.method === "GET") return json(200, await feedSnapshot());
       if (url.pathname === "/api/translation-status" && request.method === "GET") return json(200, { public: true, ai: aiReady(env) });
+      // Pages 包不代理中国服务器的私有 Browser Run 凭据；前端据此隐藏原生截图入口。
+      if (url.pathname === "/api/x-screenshot-status" && request.method === "GET") return json(200, { enabled: false });
       if (url.pathname === "/api/translate" && request.method === "POST") {
         const origin = request.headers.get("origin");
         if (origin && origin !== url.origin) throw fault(403, "不允许跨站翻译请求。");

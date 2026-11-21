@@ -11,12 +11,13 @@
     "web:check": "node --check web/config.js && node --check web/app.js && node --check web/post-cards.js && node --check web/sw.js",
     "stream:check": "node --check server/stream-worker.cjs",
     "web:serve": "node server/web-server.cjs",
-    "translation:check": "node --check server/web-server.cjs",
+    "translation:check": "node --check server/web-server.cjs && node --check server/feed-service.mjs && node --check server/reset-calendar.mjs && node --check cloudflare/worker.mjs",
     "stream:start": "node server/stream-worker.cjs"
   },
   "devDependencies": {
     "electron": "^37.0.0",
-    "electron-builder": "^26.0.0"
+    "electron-builder": "^26.0.0",
+    "esbuild": "0.28.2"
   },
   "build": {
     "appId": "com.chloride233.tiboresetwatch",

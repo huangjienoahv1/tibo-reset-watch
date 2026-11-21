@@ -7,6 +7,11 @@ const PORT = Number(process.env.PORT || 8788);
 const HOST = process.env.HOST || "127.0.0.1";
 const WEB_ROOT = path.resolve(__dirname, "../web");
 const CACHE_DIR = process.env.TRANSLATION_CACHE_DIR;
+const FEED_CACHE_DIR = process.env.FEED_CACHE_DIR || (CACHE_DIR ? path.join(CACHE_DIR, "feed") : null);
+const FEED_CACHE_MAX_BYTES = 8 * 1024 * 1024;
+const X_SCREENSHOT_CACHE_DIR = process.env.X_SCREENSHOT_CACHE_DIR;
+const CLOUDFLARE_ACCOUNT_ID = String(process.env.CLOUDFLARE_ACCOUNT_ID || "").trim();
+const CLOUDFLARE_BROWSER_API_TOKEN = String(process.env.CLOUDFLARE_BROWSER_API_TOKEN || "").trim();
 const CACHE_LIMIT = 1000;
 const MAX_TEXT_BYTES = 24000;
 const MAX_BODY_BYTES = MAX_TEXT_BYTES * 2;
@@ -15,26 +20,44 @@ const MAX_CONCURRENT = 2;
 const REQUESTS_PER_MINUTE = 20;
 const TIMEOUT_MS = 55000;
 const FEED_TIMEOUT_MS = 20000;
-const FEED_CACHE_TTL_MS = 60 * 1000;
-const FEED_POST_LIMIT = 20;
 const REPLY_CONTEXT_CACHE_LIMIT = 500;
 const REPLY_CONTEXT_SUCCESS_TTL_MS = 6 * 60 * 60 * 1000;
 const REPLY_CONTEXT_FAILURE_TTL_MS = 15 * 60 * 1000;
+const X_SCREENSHOT_TIMEOUT_MS = 50000;
+const X_SCREENSHOT_MAX_BYTES = 12 * 1024 * 1024;
+const X_SCREENSHOT_MAX_CONCURRENT = 1;
+const X_SCREENSHOT_REQUESTS_PER_MINUTE = 6;
 const cache = new Map();
 const pending = new Map();
 const replyContextCache = new Map();
 const pendingReplyContexts = new Map();
-let feedCache = null;
-let pendingFeed = null;
+const pendingXScreenshots = new Map();
 let requestTimes = [];
+let xScreenshotRequestTimes = [];
 const aiReady = Boolean(process.env.AI_TRANSLATION_URL && process.env.AI_TRANSLATION_MODEL);
 const aiIdentity = [process.env.AI_TRANSLATION_URL, process.env.AI_TRANSLATION_MODEL].join("|");
+const xScreenshotReady = Boolean(X_SCREENSHOT_CACHE_DIR && CLOUDFLARE_ACCOUNT_ID && CLOUDFLARE_BROWSER_API_TOKEN);
 const FILES = { "index.html": "text/html", "app.js": "text/javascript", "post-cards.js": "text/javascript", "config.js": "text/javascript", "sw.js": "text/javascript", "styles.css": "text/css", "favicon.svg": "image/svg+xml", "manifest.webmanifest": "application/manifest+json" };
 
 function fault(status, message) { return Object.assign(new Error(message), { status }); }
 function json(response, status, value) {
   response.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
   response.end(JSON.stringify(value));
+}
+
+function png(response, tweetId, content) {
+  response.writeHead(200, {
+    "Content-Type": "image/png",
+    "Content-Length": content.length,
+    "Content-Disposition": `attachment; filename="Tibo-${tweetId}-x-original.png"`,
+    "Cache-Control": "public, max-age=31536000, immutable",
+    "X-Content-Type-Options": "nosniff",
+  });
+  response.end(content);
+}
+
+function isPng(content) {
+  return content.length >= 8 && content.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
 }
 
 function decodeHtml(value) {
@@ -102,113 +125,29 @@ async function fxTwitterReplyContext(tweetId) {
   }, tweetId);
 }
 
-function validateFeedSnapshot(snapshot) {
-  if (!snapshot || snapshot.source_scope !== "timeline" ||
-      String(snapshot.profile?.handle || "").toLowerCase() !== "thsottiaux" ||
-      !Array.isArray(snapshot.tweets)) {
-    throw new Error("invalid Tibo feed snapshot");
-  }
-  return snapshot;
-}
-
-async function primaryFeedSnapshot() {
-  const response = await fetch("https://codex-reset.com/api/feed", {
-    headers: {
-      Accept: "application/json",
-      "User-Agent": "tibo-reset-watch/0.3 (+http://39.98.37.208:9104)",
+const feedService = import("./feed-service.mjs").then(({ createFeedService }) => createFeedService({
+  browserRun: CLOUDFLARE_ACCOUNT_ID && CLOUDFLARE_BROWSER_API_TOKEN
+    ? { accountId: CLOUDFLARE_ACCOUNT_ID, apiToken: CLOUDFLARE_BROWSER_API_TOKEN } : null,
+  storage: FEED_CACHE_DIR ? {
+    async load() {
+      const file = path.join(FEED_CACHE_DIR, "snapshot.json");
+      try {
+        if ((await fs.promises.stat(file)).size > FEED_CACHE_MAX_BYTES) throw new Error("feed cache too large");
+        return JSON.parse(await fs.promises.readFile(file, "utf8"));
+      } catch (error) { if (error.code === "ENOENT") return null; throw error; }
     },
-    signal: AbortSignal.timeout(FEED_TIMEOUT_MS),
-  });
-  if (!response.ok) throw new Error(`upstream feed HTTP ${response.status}`);
-  return validateFeedSnapshot(await response.json());
-}
-
-function normalizedFxPost(status, contexts) {
-  const replyingTo = status.replying_to;
-  const replyId = String(replyingTo?.status || "");
-  const parent = contexts.get(replyId);
-  let replyContext = null;
-  if (parent) {
-    try {
-      replyContext = validateReplyContext({
-        id: parent.id,
-        text: parent.text,
-        author_name: parent.author?.name,
-        author_handle: parent.author?.screen_name,
-        url: parent.url,
-        source: "fxtwitter",
-      }, replyId);
-    } catch {
-      replyContext = null;
-    }
-  }
-  return {
-    id: String(status.id),
-    url: status.url,
-    text: String(status.text || ""),
-    at: new Date(Number(status.created_timestamp) * 1000).toISOString(),
-    is_reply: Boolean(replyId),
-    replying_to: replyingTo?.screen_name || null,
-    in_reply_to_tweet_id: replyId || null,
-    conversation_id: replyId || String(status.id),
-    replies: Number(status.replies || 0),
-    reposts: Number(status.reposts || 0),
-    likes: Number(status.likes || 0),
-    ...(replyContext ? { reply_context: replyContext } : {}),
-  };
-}
-
-async function fxTwitterFeedSnapshot() {
-  const url = "https://api.fxtwitter.com/2/profile/thsottiaux/statuses?count=50&with_replies=true";
-  const response = await fetch(url, {
-    headers: { Accept: "application/json" },
-    signal: AbortSignal.timeout(FEED_TIMEOUT_MS),
-  });
-  if (!response.ok) throw new Error(`FxTwitter timeline HTTP ${response.status}`);
-  const result = await response.json();
-  const statuses = Array.isArray(result.results)
-    ? result.results.filter((item) => item?.type === "status" && /^\d+$/.test(String(item.id)))
-    : [];
-  const contexts = new Map(statuses.map((item) => [String(item.id), item]));
-  const ownStatuses = statuses
-    .filter((item) => String(item.author?.screen_name || "").toLowerCase() === "thsottiaux")
-    .slice(0, FEED_POST_LIMIT);
-  if (ownStatuses.length === 0) throw new Error("FxTwitter timeline returned no Tibo posts");
-  const tweets = ownStatuses.map((item) => normalizedFxPost(item, contexts));
-  const fetchedAt = new Date().toISOString();
-  return validateFeedSnapshot({
-    version: 1,
-    fetched_at: fetchedAt,
-    source: "fx-twitter-public",
-    source_scope: "timeline",
-    stale: false,
-    newest_post_at: tweets[0]?.at || null,
-    profile: {
-      handle: "thsottiaux",
-      name: ownStatuses[0]?.author?.name || "Tibo",
-      followers: Number(ownStatuses[0]?.author?.followers || 0),
+    async save(value) {
+      const text = JSON.stringify(value);
+      if (Buffer.byteLength(text) > FEED_CACHE_MAX_BYTES) throw new Error("feed cache too large");
+      await fs.promises.mkdir(FEED_CACHE_DIR, { recursive: true, mode: 0o700 });
+      const file = path.join(FEED_CACHE_DIR, "snapshot.json");
+      await fs.promises.writeFile(file + ".tmp", text, { mode: 0o600 });
+      await fs.promises.rename(file + ".tmp", file);
     },
-    tweets,
-  });
-}
+  } : null,
+}));
 
-// 页面只读取同源接口：优先保持原 feed 合同，受 Cloudflare 阻断时切到公开 X 时间线镜像。
-async function feedSnapshot() {
-  if (feedCache?.expiresAt > Date.now()) return feedCache.value;
-  if (pendingFeed) return pendingFeed;
-  pendingFeed = (async () => {
-    let value;
-    try {
-      value = await primaryFeedSnapshot();
-    } catch (primaryError) {
-      console.warn("primary_feed_unavailable", primaryError.message);
-      value = await fxTwitterFeedSnapshot();
-    }
-    feedCache = { expiresAt: Date.now() + FEED_CACHE_TTL_MS, value };
-    return value;
-  })();
-  try { return await pendingFeed; } finally { pendingFeed = null; }
-}
+async function feedSnapshot() { return (await feedService)(); }
 
 async function oEmbedReplyContext(tweetId, post) {
   const url = new URL("https://publish.twitter.com/oembed");
@@ -258,6 +197,95 @@ async function replyContext(post) {
   try { return await work; } finally { pendingReplyContexts.delete(tweetId); }
 }
 
+function validateScreenshotPost(post, tweetId) {
+  if (!post || String(post.id) !== tweetId) throw fault(404, "当前动态中未找到该帖子。");
+  let url;
+  try { url = new URL(post.url); } catch { throw fault(502, "数据源中的原帖地址无效。"); }
+  const host = url.hostname.toLowerCase();
+  const parts = url.pathname.split("/").filter(Boolean);
+  if (!["x.com", "www.x.com", "twitter.com", "www.twitter.com"].includes(host) ||
+      parts[0]?.toLowerCase() !== "thsottiaux" || parts[1]?.toLowerCase() !== "status" || parts[2] !== tweetId) {
+    throw fault(502, "数据源中的原帖地址未通过校验。");
+  }
+  return `https://x.com/thsottiaux/status/${tweetId}`;
+}
+
+function screenshotCachePath(tweetId) {
+  return path.join(X_SCREENSHOT_CACHE_DIR, `${tweetId}.png`);
+}
+
+async function requestCloudflareScreenshot(tweetId, targetUrl) {
+  const endpoint = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(CLOUDFLARE_ACCOUNT_ID)}/browser-rendering/screenshot`;
+  const response = await fetch(endpoint, {
+    method: "POST",
+    redirect: "error",
+    signal: AbortSignal.timeout(X_SCREENSHOT_TIMEOUT_MS),
+    headers: {
+      Authorization: `Bearer ${CLOUDFLARE_BROWSER_API_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      url: targetUrl,
+      selector: "article",
+      viewport: { width: 1280, height: 1600, deviceScaleFactor: 2 },
+      gotoOptions: { waitUntil: "domcontentloaded", timeout: 30000 },
+      waitForSelector: { selector: "article", visible: true, timeout: 30000 },
+      waitForTimeout: 1000,
+      screenshotOptions: { type: "png" },
+      addScriptTag: [{
+        content: `(() => {
+          const article = document.querySelector("article");
+          if (!article) return;
+          const target = article.getBoundingClientRect();
+          for (const element of document.querySelectorAll("body *")) {
+            if (element === article || element.contains(article) || article.contains(element)) continue;
+            const position = getComputedStyle(element).position;
+            if (position !== "fixed" && position !== "sticky") continue;
+            const rect = element.getBoundingClientRect();
+            if (rect.left < target.right && rect.right > target.left) element.style.setProperty("display", "none", "important");
+          }
+        })();`,
+      }],
+    }),
+  });
+  if (!response.ok) {
+    if (response.status === 429) throw fault(429, "X 原文截图请求较多，请稍后重试。");
+    if ([401, 403].includes(response.status)) throw fault(503, "X 原文截图服务配置无效，请检查 Cloudflare 凭据。");
+    throw fault(502, "Cloudflare 暂时无法生成 X 原文截图，请稍后重试。");
+  }
+  const declaredLength = Number(response.headers.get("content-length") || 0);
+  if (declaredLength > X_SCREENSHOT_MAX_BYTES) throw fault(502, "X 原文截图尺寸超过限制。");
+  const content = Buffer.from(await response.arrayBuffer());
+  if (content.length > X_SCREENSHOT_MAX_BYTES || !isPng(content)) throw fault(502, "截图服务未返回有效 PNG 图片。");
+  const destination = screenshotCachePath(tweetId);
+  fs.writeFileSync(destination + ".tmp", content, { mode: 0o600 });
+  fs.renameSync(destination + ".tmp", destination);
+  return content;
+}
+
+// 截图入口只接受当前可信 feed 中 Tibo 的帖子 ID；同一帖子并发请求合并，成功后持久化缓存。
+async function xScreenshot(tweetId) {
+  if (!xScreenshotReady) throw fault(503, "X 原文截图服务尚未配置。");
+  const cachedPath = screenshotCachePath(tweetId);
+  if (fs.existsSync(cachedPath)) {
+    const content = fs.readFileSync(cachedPath);
+    if (content.length <= X_SCREENSHOT_MAX_BYTES && isPng(content)) return content;
+    fs.rmSync(cachedPath, { force: true });
+    console.warn("x_screenshot_cache_invalid", tweetId);
+  }
+  if (pendingXScreenshots.has(tweetId)) return pendingXScreenshots.get(tweetId);
+  xScreenshotRequestTimes = xScreenshotRequestTimes.filter((at) => at > Date.now() - 60000);
+  if (pendingXScreenshots.size >= X_SCREENSHOT_MAX_CONCURRENT || xScreenshotRequestTimes.length >= X_SCREENSHOT_REQUESTS_PER_MINUTE) {
+    throw fault(429, "X 原文截图请求较多，请稍后重试。");
+  }
+  const snapshot = await feedSnapshot();
+  const targetUrl = validateScreenshotPost(snapshot.tweets.find((post) => String(post.id) === tweetId), tweetId);
+  xScreenshotRequestTimes.push(Date.now());
+  const work = requestCloudflareScreenshot(tweetId, targetUrl);
+  pendingXScreenshots.set(tweetId, work);
+  try { return await work; } finally { pendingXScreenshots.delete(tweetId); }
+}
+
 // 成功译文持久化到独立目录，键包含内容、供应商和模型；失败不写缓存。
 function remember(key, value) {
   if (CACHE_DIR) {
@@ -283,6 +311,7 @@ if (CACHE_DIR) {
     } catch { console.warn("translation_cache_invalid", name); }
   }
 }
+if (X_SCREENSHOT_CACHE_DIR) fs.mkdirSync(X_SCREENSHOT_CACHE_DIR, { recursive: true });
 
 function segments(text) {
   const result = [];
@@ -367,11 +396,18 @@ const server = http.createServer(async (request, response) => {
     const requestUrl = new URL(request.url, "http://localhost");
     const pathname = requestUrl.pathname;
     if (request.method === "GET" && pathname === "/api/translation-status") return json(response, 200, { public: true, ai: aiReady });
+    if (request.method === "GET" && pathname === "/api/x-screenshot-status") return json(response, 200, { enabled: xScreenshotReady });
     if (request.method === "GET" && pathname === "/api/feed") return json(response, 200, await feedSnapshot());
     if (request.method === "GET" && pathname === "/api/reply-context") {
       const tweetId = requestUrl.searchParams.get("id") || "";
       if (!/^\d+$/.test(tweetId)) throw fault(400, "被回复帖 ID 无效。");
       return json(response, 200, { reply_context: await replyContext({ in_reply_to_tweet_id: tweetId }) });
+    }
+    if (request.method === "GET" && pathname === "/api/x-screenshot") {
+      if (request.headers.origin && new URL(request.headers.origin).host !== request.headers.host) throw fault(403, "不允许跨站截图请求。");
+      const tweetId = requestUrl.searchParams.get("id") || "";
+      if (!/^\d+$/.test(tweetId)) throw fault(400, "帖子 ID 无效。");
+      return png(response, tweetId, await xScreenshot(tweetId));
     }
     if (request.method === "POST" && pathname === "/api/translate") {
       if (request.headers.origin && new URL(request.headers.origin).host !== request.headers.host) throw fault(403, "不允许跨站翻译请求。");

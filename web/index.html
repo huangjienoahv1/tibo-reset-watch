@@ -6,9 +6,9 @@
     <meta name="theme-color" content="#10191f" media="(prefers-color-scheme: dark)" />
     <meta name="theme-color" content="#f3f6f9" media="(prefers-color-scheme: light)" />
     <meta name="color-scheme" content="dark light" />
-    <meta name="description" content="只看 @thsottiaux 本人发布的动态。他提到 Codex reset 时，浏览器会提醒你。" />
+    <meta name="description" content="综合 Tibo 公开动态与 Codex 重置订阅信号，保留来源并提醒新变化。" />
     <meta property="og:title" content="Tibo Reset Watch" />
-    <meta property="og:description" content="只看 @thsottiaux 本人发布的动态。他提到 Codex reset 时，浏览器会提醒你。" />
+    <meta property="og:description" content="综合 Tibo 公开动态与 Codex 重置订阅信号，保留来源并提醒新变化。" />
     <meta property="og:type" content="website" />
     <link rel="icon" href="favicon.svg" type="image/svg+xml" />
     <link rel="manifest" href="manifest.webmanifest" />
@@ -22,7 +22,7 @@
         <a class="brand" href="./" aria-label="Tibo Reset Watch home" data-od-id="brand-link">
           <span>
             <strong>Tibo Reset Watch</strong>
-            <small>只看 Tibo 本人动态</small>
+            <small>Tibo 动态与重置信号汇总</small>
           </span>
         </a>
         <div class="source-indicator" id="source-indicator" data-state="loading" role="status" aria-live="polite" data-od-id="source-health">
@@ -36,7 +36,7 @@
           <div class="overview-head">
             <div class="intro-copy" data-od-id="hero-summary">
               <h1 id="page-title" data-od-id="page-title">Tibo Reset 监测</h1>
-              <p class="lede">只读取 @thsottiaux 本人发布的帖子，并在出现 Codex reset 时提醒。</p>
+              <p class="lede">综合 @thsottiaux 公开动态与订阅重置信号，同帖合并、标明来源，出现新信号时提醒。</p>
             </div>
             <div class="overview-controls">
               <div class="action-row" data-od-id="primary-actions">
@@ -52,14 +52,14 @@
             <p class="filter-note">筛选下方最新动态、历史和 Reset 提醒，不影响通知条件。</p>
           </div>
           <div class="dashboard-grid">
-            <article class="latest-panel" aria-label="Tibo 最新动态" aria-busy="true" data-state="loading" data-od-id="latest-post-card">
+            <article class="latest-panel" aria-label="综合最新动态" aria-busy="true" data-state="loading" data-od-id="latest-post-card">
               <p class="panel-kicker">最新动态</p>
               <div class="post-author-row">
                 <div class="author-lockup">
-                  <span class="author-avatar" aria-hidden="true">T</span>
+                  <span class="author-avatar" id="latest-author-avatar" aria-hidden="true">T</span>
                   <span>
-                    <strong>Tibo</strong>
-                    <small>@thsottiaux</small>
+                    <strong id="latest-author-name">Tibo</strong>
+                    <small id="latest-author-handle">@thsottiaux</small>
                   </span>
                 </div>
                 <div class="post-meta">
@@ -99,9 +99,27 @@
                   <dd id="next-check">等待中</dd>
                 </div>
               </dl>
-              <p class="status-note">页面每 2 分钟读取最新快照；浏览器不会保存帖子历史。优先数据：<a href="https://codex-reset.com/" target="_blank" rel="noopener noreferrer">codex-reset.com</a>。</p>
+              <p class="status-note">页面每 2 分钟综合读取公开来源；暂时读取失败时保留已有动态，并标明缓存状态。</p>
             </aside>
           </div>
+        </section>
+
+        <section class="reset-calendar" aria-labelledby="calendar-heading">
+          <div class="section-heading">
+            <div>
+              <h2 id="calendar-heading">最近 30 天已重置日历</h2>
+              <p class="section-description" id="calendar-range">正在读取重置历史…</p>
+            </div>
+            <p class="calendar-summary" id="calendar-summary">等待统计</p>
+          </div>
+          <div class="calendar-legend" aria-label="日历图例">
+            <span data-status="confirmed">原文已确认</span>
+            <span data-status="reported">第三方已完成报告</span>
+            <span data-status="unknown">无记录</span>
+          </div>
+          <div class="calendar-grid" id="calendar-grid" aria-label="北京时间最近 30 天重置记录"></div>
+          <p class="calendar-note" id="calendar-note">仅统计已完成的额度重置；无记录不代表当天未重置。</p>
+          <div class="calendar-details" id="calendar-details" aria-live="polite"></div>
         </section>
 
         <section class="timeline-section" aria-labelledby="timeline-heading" data-od-id="recent-posts-section">

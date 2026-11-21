@@ -22,6 +22,8 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $deployFiles = @(
     'package.json'
     'server/web-server.cjs'
+    'server/feed-service.mjs'
+    'server/reset-calendar.mjs'
     'web/app.js'
     'web/config.js'
     'web/favicon.svg'
@@ -205,6 +207,8 @@ test "$actual_file_count" -eq "$expected_file_count"
 
 node_bin="$base/runtime/current/bin/node"
 "$node_bin" --check "$new_release/server/web-server.cjs"
+"$node_bin" --check "$new_release/server/feed-service.mjs"
+"$node_bin" --check "$new_release/server/reset-calendar.mjs"
 "$node_bin" --check "$new_release/web/config.js"
 "$node_bin" --check "$new_release/web/app.js"
 "$node_bin" --check "$new_release/web/post-cards.js"

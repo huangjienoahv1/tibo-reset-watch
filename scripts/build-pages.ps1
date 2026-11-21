@@ -9,7 +9,10 @@ $assets = @('index.html', 'app.js', 'post-cards.js', 'config.js', 'sw.js', 'styl
 foreach ($asset in $assets) {
     Copy-Item -LiteralPath (Join-Path $projectRoot "web/$asset") -Destination (Join-Path $siteRoot $asset)
 }
-Copy-Item -LiteralPath (Join-Path $projectRoot 'cloudflare/worker.mjs') -Destination (Join-Path $siteRoot '_worker.js')
+$esbuild = Join-Path $projectRoot 'node_modules/.bin/esbuild.cmd'
+if (-not (Test-Path -LiteralPath $esbuild)) { throw '缺少 Pages 打包工具，请先执行 npm.cmd ci。' }
+& $esbuild (Join-Path $projectRoot 'cloudflare/worker.mjs') --bundle --format=esm --platform=browser --target=es2022 "--outfile=$(Join-Path $siteRoot '_worker.js')"
+if ($LASTEXITCODE -ne 0) { throw 'Pages Worker 打包失败。' }
 foreach ($name in @('_routes.json', '_headers')) {
     Copy-Item -LiteralPath (Join-Path $projectRoot "cloudflare/$name") -Destination (Join-Path $siteRoot $name)
 }

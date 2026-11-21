@@ -1,14 +1,24 @@
 const FEED_ENDPOINT = window.TIBO_RESET_WATCH_CONFIG?.feedEndpoint || "/api/feed";
 const TIBO_HANDLE = "thsottiaux";
 const NORMAL_INTERVAL_MS = 120_000;
+const REPLY_CONTEXT_WORKERS = 3;
+const REPLY_CONTEXT_TIMEOUT_MS = 12_000;
 const RECENT_HISTORY_MS = 3 * 24 * 60 * 60 * 1_000;
 const STORAGE_KEY = "tibo-reset-watch.web.v1";
-const POST_TYPES = { all: "全部动态", post: "自己发帖", reply: "回复他人", unknown: "类型待确认" };
+const POST_TYPES = { all: "全部动态", post: "自己发帖", reply: "回复他人", subscription: "订阅信号", unknown: "类型待确认" };
+const SUBSCRIPTION_SOURCE = "rss-bz-telegram";
+const SUBSCRIPTION_LABEL = "AI情报局订阅 · 第三方判定";
+const CALENDAR_STATUS = { confirmed: "已确认", reported: "待核实", unknown: "无记录" };
+const CALENDAR_WEEKDAYS = ["一", "二", "三", "四", "五", "六", "日"];
+const CALENDAR_TIME_FORMAT = new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit" });
 
 const refs = {
   postFilters: document.getElementById("post-filters"),
   historyRange: document.getElementById("history-range"),
   latestCards: document.getElementById("latest-cards"),
+  latestAuthorName: document.getElementById("latest-author-name") || document.querySelector(".author-lockup strong"),
+  latestAuthorHandle: document.getElementById("latest-author-handle") || document.querySelector(".author-lockup small"),
+  latestAuthorAvatar: document.getElementById("latest-author-avatar") || document.querySelector(".author-avatar"),
   latestReplyContext: document.getElementById("latest-reply-context"),
   latestType: document.getElementById("latest-type"),
   sourceIndicator: document.getElementById("source-indicator"),
@@ -33,6 +43,11 @@ const refs = {
   lastChecked: document.getElementById("last-checked"),
   errorBanner: document.getElementById("error-banner"),
   errorText: document.getElementById("error-text"),
+  calendarRange: document.getElementById("calendar-range"),
+  calendarSummary: document.getElementById("calendar-summary"),
+  calendarGrid: document.getElementById("calendar-grid"),
+  calendarNote: document.getElementById("calendar-note"),
+  calendarDetails: document.getElementById("calendar-details"),
 };
 
 const state = {
@@ -47,6 +62,10 @@ const state = {
   posts: [],
   alerts: [],
   primed: false,
+  subscriptionPrimed: false,
+  aggregationPrimed: false,
+  calendar: null,
+  calendarDate: null,
   seen: new Set(),
   mode: "possibleAndConfirmed",
 };
@@ -117,6 +136,7 @@ function isTiboPost(post) {
 }
 
 function classify(post) {
+  if (post.visibility_only || post.entry_kind === "subscription") return null;
   const text = String(post.text || "").toLowerCase();
   if (containsAny(text, noResetPhrases)) return null;
 
@@ -132,12 +152,41 @@ function classify(post) {
   return null;
 }
 
+function validSubscriptionSignal(signal) {
+  return signal?.source === SUBSCRIPTION_SOURCE && isTiboPost(signal) &&
+    ["upcoming", "confirmed"].includes(signal.status) &&
+    typeof signal.summary === "string" && signal.summary.trim() &&
+    /^https:\/\/t\.me\/ai_pulse_zh\/\d+$/.test(signal.source_url) &&
+    Number.isFinite(Date.parse(signal.published_at));
+}
+
+function resetAlerts(snapshot, posts) {
+  const alerts = new Map(posts.map(classify).filter(Boolean).map((alert) => [alert.post.id, alert]));
+  const originals = new Map(posts.filter((post) => post.entry_kind !== "subscription").map((post) => [post.id, post]));
+  for (const signal of Array.isArray(snapshot.reset_signals) ? snapshot.reset_signals : []) {
+    if (!validSubscriptionSignal(signal)) continue;
+    const existing = alerts.get(signal.id);
+    if (existing) { existing.subscription = signal; continue; }
+    const original = originals.get(signal.id);
+    // 订阅摘要保留独立身份，没有原文时不生成原文分享卡片。
+    alerts.set(signal.id, {
+      post: original || { id: signal.id, url: signal.url, text: signal.summary, at: signal.published_at,
+        entry_kind: "subscription", subscription: signal },
+      subscription: signal, thirdParty: true, hasOriginal: Boolean(original),
+      level: "upcoming", key: `${signal.id}|upcoming`,
+    });
+  }
+  return [...alerts.values()].sort((a, b) => Date.parse(b.post.at) - Date.parse(a.post.at));
+}
+
 function readStoredState() {
   try {
     const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
     state.postFilter = Object.hasOwn(POST_TYPES, stored.postFilter) ? stored.postFilter : "all";
     state.historyRange = stored.historyRange === "recent" ? "recent" : "all";
     state.primed = stored.primed === true;
+    state.subscriptionPrimed = stored.subscriptionPrimed === true;
+    state.aggregationPrimed = stored.aggregationPrimed === true;
     state.mode = stored.mode === "confirmedOnly" ? "confirmedOnly" : "possibleAndConfirmed";
     state.seen = new Set(Array.isArray(stored.seen) ? stored.seen : []);
   } catch {
@@ -153,6 +202,8 @@ function saveStoredState() {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
       primed: state.primed,
+      subscriptionPrimed: state.subscriptionPrimed,
+      aggregationPrimed: state.aggregationPrimed,
       postFilter: state.postFilter,
       historyRange: state.historyRange,
       mode: state.mode,
@@ -206,6 +257,15 @@ function formatFreshness(value) {
 
 function sourcePresentation(snapshot) {
   const source = String(snapshot.source || "").toLowerCase();
+  if (source === "combined-public") {
+    const count = snapshot.timeline_sources?.filter((item) => item.status === "ok").length || 0;
+    return { label: count ? `综合来源（${count} 个时间线来源 + 订阅）`
+      : snapshot.timeline_status === "cached" ? "综合来源（保留动态 + 订阅）" : "综合来源（订阅动态）",
+      cadence: "页面每 2 分钟综合读取，来源失败时保留已取得的记录" };
+  }
+  if (source === SUBSCRIPTION_SOURCE) {
+    return { label: "AI情报局订阅（时间线暂不可用）", cadence: "仅订阅信号，页面每 2 分钟检查一次" };
+  }
   if (source === "x-filtered-stream") {
     return { label: "X 实时流", cadence: "X 会实时推送新动态，页面每 2 分钟再确认一次" };
   }
@@ -241,7 +301,7 @@ function setSourceState(text, status = "loading") {
   refs.sourceState.textContent = text;
   refs.sourceIndicator.dataset.state = status;
   refs.statusLive.dataset.state = status;
-  refs.statusLive.lastChild.textContent = status === "ok" ? "正常运行" : status === "error" ? "连接异常" : "正在读取";
+  refs.statusLive.lastChild.textContent = status === "ok" ? "正常运行" : status === "warning" ? "部分来源不可用" : status === "error" ? "连接异常" : "正在读取";
 }
 
 function setError(message = "") {
@@ -260,21 +320,35 @@ function retryIntervalMs(failureCount) {
 
 function validateSnapshot(snapshot) {
   if (snapshot.stale) throw new Error("数据源已经过期");
-  if (snapshot.source_scope?.toLowerCase() !== "timeline" ||
+  const subscriptionOnly = snapshot.source_scope === "reset-signals" &&
+    [SUBSCRIPTION_SOURCE, "combined-public"].includes(snapshot.source) && Array.isArray(snapshot.reset_signals) &&
+    snapshot.reset_signals.some(validSubscriptionSignal);
+  const historyOnly = snapshot.source_scope === "reset-history" && snapshot.source === "combined-public" &&
+    Array.isArray(snapshot.reset_calendar?.days);
+  if ((!subscriptionOnly && !historyOnly && snapshot.source_scope?.toLowerCase() !== "timeline") ||
       snapshot.profile?.handle?.toLowerCase() !== TIBO_HANDLE) {
     throw new Error("数据源不是 @thsottiaux 本人的时间线");
   }
-
   const sourcePosts = Array.isArray(snapshot.tweets) ? snapshot.tweets : [];
   const posts = sourcePosts.filter(isTiboPost);
   if (sourcePosts.length > 0 && posts.length === 0) {
     throw new Error("没有找到由 Tibo 本人发布的帖子");
   }
-  return posts;
+  // 订阅进入同一个展示列表；同 ID 已有原文时只保留原文并附加订阅依据。
+  const entries = new Map(posts.map((post) => [post.id, { ...post, entry_kind: "tibo" }]));
+  for (const signal of Array.isArray(snapshot.reset_signals) ? snapshot.reset_signals : []) {
+    if (!validSubscriptionSignal(signal)) continue;
+    const original = entries.get(signal.id);
+    if (original) original.subscription = signal;
+    else entries.set(signal.id, { id: signal.id, url: signal.url, text: signal.summary,
+      at: signal.published_at, entry_kind: "subscription", subscription: signal });
+  }
+  return [...entries.values()];
 }
 
 // 新旧记录统一按来源元数据分类，缺少依据时不从正文猜测。
 function postType(post) {
+  if (post.entry_kind === "subscription") return { type: "subscription", label: "订阅信号 · 第三方摘要" };
   const target = typeof post.replying_to === "string" ? post.replying_to.trim().replace(/^@/, "") : "";
   if (target.toLowerCase() === TIBO_HANDLE) return { type: "post", label: "自己发帖 · 续帖" };
   if (target || post.is_reply === true || post.referenced_tweets?.some((item) => item.type === "replied_to")) {
@@ -333,17 +407,41 @@ function createReplyContext(post) {
   return root;
 }
 
+function createSubscriptionContext(signal, includeSummary) {
+  if (!validSubscriptionSignal(signal)) return null;
+  const source = document.createElement("aside");
+  source.className = "reply-context";
+  const sourceLink = document.createElement("a");
+  sourceLink.href = signal.source_url;
+  sourceLink.target = "_blank";
+  sourceLink.rel = "noopener noreferrer";
+  sourceLink.textContent = SUBSCRIPTION_LABEL + " ↗";
+  source.append(sourceLink);
+  if (includeSummary) {
+    const summary = document.createElement("p");
+    summary.textContent = signal.summary;
+    source.append(summary);
+  }
+  return source;
+}
+
 async function enrichReplyContexts(posts) {
-  await Promise.all(posts.map(async (post) => {
-    const tweetId = String(post.in_reply_to_tweet_id || "");
-    if (!/^\d+$/.test(tweetId) || post.reply_context) return;
-    try {
-      const response = await fetch(`/api/reply-context?id=${encodeURIComponent(tweetId)}`, { cache: "no-store" });
-      if (!response.ok) return;
-      const result = await response.json();
-      if (result.reply_context?.text) post.reply_context = result.reply_context;
-    } catch {
-      // 主 feed 已可用时，回复上下文补全失败不应阻断整页展示。
+  const queue = posts.filter((post) => /^\d+$/.test(String(post.in_reply_to_tweet_id || "")) && !post.reply_context);
+  await Promise.all(Array.from({ length: Math.min(REPLY_CONTEXT_WORKERS, queue.length) }, async () => {
+    while (queue.length && state.posts === posts) {
+      const post = queue.shift();
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => controller.abort(), REPLY_CONTEXT_TIMEOUT_MS);
+      try {
+        const response = await fetch(`/api/reply-context?id=${encodeURIComponent(post.in_reply_to_tweet_id)}`, {
+          cache: "no-store", signal: controller.signal,
+        });
+        if (!response.ok) continue;
+        const result = await response.json();
+        if (result.reply_context?.text) post.reply_context = result.reply_context;
+      } catch {
+        // 原文继续展示，未取得的上下文保留明确的不可用提示。
+      } finally { window.clearTimeout(timer); }
     }
   }));
 }
@@ -378,16 +476,25 @@ function updateLatest(posts) {
     return;
   }
 
-  refs.latestCards.append(window.TiboPostCards.create(post, postType(post)));
-  const signal = classify(post);
+  const subscriptionEntry = post.entry_kind === "subscription";
+  refs.latestAuthorName.textContent = subscriptionEntry ? "AI情报局" : "Tibo";
+  refs.latestAuthorHandle.textContent = subscriptionEntry ? "订阅消息 · 非 Tibo 原文" : "@thsottiaux";
+  refs.latestAuthorAvatar.textContent = subscriptionEntry ? "订" : "T";
+  if (!subscriptionEntry) refs.latestCards.append(window.TiboPostCards.create(post, postType(post)));
+  const directSignal = classify(post);
+  const signal = directSignal || (post.subscription ? { level: "upcoming" } : null);
   const kind = postType(post);
   refs.latestType.textContent = kind.label;
   refs.latestType.dataset.type = kind.type;
-  refs.latestTime.textContent = formatTime(post.at);
+  refs.latestTime.textContent = (subscriptionEntry ? "订阅发布于 " : "") + formatTime(post.at);
   refs.latestText.textContent = fullPostText(post.text);
   const replyContext = createReplyContext(post);
   if (replyContext) refs.latestReplyContext.append(replyContext);
-  refs.latestPostKind.textContent = signal?.level === "confirmed"
+  const subscriptionContext = createSubscriptionContext(post.subscription, !subscriptionEntry);
+  if (subscriptionContext) refs.latestReplyContext.append(subscriptionContext);
+  refs.latestPostKind.textContent = !directSignal && post.subscription
+    ? (post.subscription.status === "confirmed" ? "第三方称已重置 · 待核实" : "第三方重置预告")
+    : signal?.level === "confirmed"
     ? "已经确认重置"
     : signal?.level === "upcoming" ? "可能重置" : "普通动态";
   refs.latestPostKind.dataset.level = signal?.level || "other";
@@ -417,7 +524,7 @@ function createRecentPostRow(post) {
   const kind = createTypeBadge(post);
   const time = document.createElement("time");
   time.dateTime = post.at || "";
-  time.textContent = formatTime(post.at);
+  time.textContent = (post.entry_kind === "subscription" ? "订阅发布于 " : "") + formatTime(post.at);
   meta.append(kind, time);
 
   const text = document.createElement("p");
@@ -433,8 +540,14 @@ function createRecentPostRow(post) {
 
   const replyContext = createReplyContext(post);
   row.append(meta, text);
-  if (replyContext) row.append(replyContext);
-  row.append(link, window.TiboPostCards.create(post, postType(post)));
+  const contexts = document.createElement("div");
+  contexts.className = "post-contexts";
+  const subscriptionContext = createSubscriptionContext(post.subscription, post.entry_kind !== "subscription");
+  if (subscriptionContext) contexts.append(subscriptionContext);
+  if (replyContext) contexts.append(replyContext);
+  if (contexts.childElementCount) row.append(contexts);
+  row.append(link);
+  if (post.entry_kind !== "subscription") row.append(window.TiboPostCards.create(post, postType(post)));
   return row;
 }
 
@@ -461,8 +574,9 @@ function renderRecentPosts() {
 
 function updateSourceFacts(snapshot, posts) {
   const presentation = sourcePresentation(snapshot);
-  state.feedFetchedAt = snapshot.fetched_at || null;
-  refs.sourceProvider.textContent = presentation.label;
+  state.feedFetchedAt = (snapshot.timeline_status === "cached" ? snapshot.timeline_last_success_at : snapshot.fetched_at) || null;
+  refs.sourceProvider.textContent = presentation.label +
+    (snapshot.source !== "combined-public" && snapshot.source_scope === "timeline" && snapshot.signal_source?.status === "ok" ? " + AI情报局订阅" : "");
   refs.feedFreshness.textContent = formatFreshness(state.feedFetchedAt);
   refs.lastChecked.textContent = formatCheckedTime();
   refs.updatedMeta.textContent = posts[0]?.at
@@ -480,11 +594,15 @@ function createAlertRow(alert) {
   head.className = "alert-head";
   const kind = document.createElement("span");
   kind.className = "alert-kind";
-  kind.textContent = alert.level === "confirmed" ? "已经确认重置" : "可能重置";
+  kind.textContent = alert.thirdParty
+    ? (alert.subscription.status === "confirmed" ? "第三方称已重置 · 待核实" : "第三方重置预告")
+    : alert.level === "confirmed" ? "已经确认重置" : "可能重置";
   const time = document.createElement("time");
   time.dateTime = alert.post.at || "";
-  time.textContent = formatTime(alert.post.at);
-  head.append(kind, createTypeBadge(alert.post), time);
+  time.textContent = (alert.thirdParty && !alert.hasOriginal ? "订阅发布于 " : "") + formatTime(alert.post.at);
+  head.append(kind);
+  if (!alert.thirdParty || alert.hasOriginal) head.append(createTypeBadge(alert.post));
+  head.append(time);
 
   const text = document.createElement("p");
   text.className = "alert-text";
@@ -499,9 +617,99 @@ function createAlertRow(alert) {
 
   const replyContext = createReplyContext(alert.post);
   row.append(head, text);
-  if (replyContext) row.append(replyContext);
-  row.append(link, window.TiboPostCards.create(alert.post, postType(alert.post)));
+  const contexts = document.createElement("div");
+  contexts.className = "post-contexts";
+  const subscriptionContext = createSubscriptionContext(alert.subscription, !alert.thirdParty || alert.hasOriginal);
+  if (subscriptionContext) contexts.append(subscriptionContext);
+  if (replyContext) contexts.append(replyContext);
+  if (contexts.childElementCount) row.append(contexts);
+  row.append(link);
+  if (!alert.thirdParty || alert.hasOriginal) row.append(window.TiboPostCards.create(alert.post, postType(alert.post)));
   return row;
+}
+
+function selectCalendarDate(date) {
+  const day = state.calendar?.days.find((item) => item.date === date);
+  if (!day || !refs.calendarDetails) return;
+  state.calendarDate = date;
+  refs.calendarGrid.querySelectorAll("button[data-date]").forEach((button) => {
+    button.setAttribute("aria-pressed", String(button.dataset.date === date));
+  });
+  refs.calendarDetails.replaceChildren();
+  const heading = document.createElement("strong");
+  heading.textContent = `${date} · ${CALENDAR_STATUS[day.status] || CALENDAR_STATUS.unknown}`;
+  refs.calendarDetails.append(heading);
+  const records = Array.isArray(day.records) ? day.records : [];
+  if (!records.length) {
+    const empty = document.createElement("p");
+    empty.textContent = "当天没有取得可核实记录，不能据此判定是否重置。";
+    refs.calendarDetails.append(empty);
+    return;
+  }
+  for (const record of records) {
+    if (!isTiboPost(record)) continue;
+    const item = document.createElement("article");
+    item.className = "calendar-record";
+    const label = document.createElement("p");
+    label.className = "calendar-record-label";
+    label.textContent = (record.level === "confirmed" ? "Tibo 原文确认" : "第三方已完成报告 · 待核实") +
+      ` · ${CALENDAR_TIME_FORMAT.format(new Date(record.at))}`;
+    const text = document.createElement("p");
+    text.textContent = record.text;
+    const link = document.createElement("a");
+    link.href = record.url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = "查看对应 X 原帖 ↗";
+    item.append(label, text, link);
+    if (["https://codex-reset.com/", "https://token.jacobai.app/"].includes(record.source_url) || /^https:\/\/t\.me\/ai_pulse_zh\/\d+$/.test(record.source_url)) {
+      const source = document.createElement("a");
+      source.href = record.source_url;
+      source.target = "_blank";
+      source.rel = "noopener noreferrer";
+      source.textContent = record.source === "rss-bz-telegram" ? "AI情报局订阅来源 ↗" : "第三方归档来源 ↗";
+      item.append(source);
+    }
+    refs.calendarDetails.append(item);
+  }
+}
+
+function renderResetCalendar(calendar) {
+  if (!refs.calendarGrid || !Array.isArray(calendar?.days) || !calendar.days.length) return;
+  state.calendar = calendar;
+  refs.calendarRange.textContent = `${calendar.start} — ${calendar.end} · 北京时间`;
+  refs.calendarSummary.textContent = `已确认 ${calendar.confirmed_days} 天 · 仅第三方报告 ${calendar.reported_days} 天`;
+  refs.calendarNote.textContent = calendar.note;
+  refs.calendarGrid.replaceChildren();
+  for (const label of CALENDAR_WEEKDAYS) {
+    const weekday = document.createElement("span");
+    weekday.className = "calendar-weekday";
+    weekday.textContent = label;
+    refs.calendarGrid.append(weekday);
+  }
+  const leading = (new Date(`${calendar.start}T00:00:00Z`).getUTCDay() + 6) % CALENDAR_WEEKDAYS.length;
+  for (let index = 0; index < leading; index += 1) {
+    const blank = document.createElement("span");
+    blank.setAttribute("aria-hidden", "true");
+    refs.calendarGrid.append(blank);
+  }
+  for (const day of calendar.days) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "calendar-day";
+    button.dataset.date = day.date;
+    button.dataset.status = day.status;
+    button.setAttribute("aria-label", `${day.date}，${CALENDAR_STATUS[day.status] || CALENDAR_STATUS.unknown}`);
+    const date = document.createElement("span");
+    date.textContent = day.date.slice(5).replace("-", "/");
+    const status = document.createElement("small");
+    status.textContent = CALENDAR_STATUS[day.status] || CALENDAR_STATUS.unknown;
+    button.append(date, status);
+    refs.calendarGrid.append(button);
+  }
+  const selected = calendar.days.some((day) => day.date === state.calendarDate) ? state.calendarDate
+    : [...calendar.days].reverse().find((day) => day.status !== "unknown")?.date || calendar.end;
+  selectCalendarDate(selected);
 }
 
 function renderAlerts() {
@@ -535,8 +743,9 @@ function notifyAlert(alert) {
   if (!notificationAllowed(alert) || !("Notification" in window) || Notification.permission !== "granted") return;
 
   const notification = new Notification(
-    alert.level === "confirmed" ? "Tibo 已确认 Codex reset" : "Tibo 可能要重置 Codex 额度",
-    { body: compactText(alert.post.text), tag: `tibo-reset-${alert.key}` },
+    alert.thirdParty ? "AI情报局：Codex 重置信号（待核实）"
+      : alert.level === "confirmed" ? "Tibo 已确认 Codex reset" : "Tibo 可能要重置 Codex 额度",
+    { body: compactText(alert.subscription?.summary || alert.post.text), tag: `tibo-reset-${alert.key}` },
   );
   notification.onclick = () => {
     window.focus();
@@ -593,9 +802,8 @@ async function poll() {
     const response = await fetch(FEED_ENDPOINT, { cache: "no-store" });
     if (!response.ok) throw new Error(`数据源返回 HTTP ${response.status}`);
     const snapshot = await response.json();
-    const posts = validateSnapshot(snapshot).sort((left, right) => String(right.at).localeCompare(String(left.at)));
-    await enrichReplyContexts(posts);
-    const alerts = posts.map(classify).filter(Boolean);
+    const posts = validateSnapshot(snapshot).sort((left, right) => Date.parse(right.at) - Date.parse(left.at));
+    const alerts = resetAlerts(snapshot, posts);
     state.posts = posts;
     state.alerts = alerts;
     state.failures = 0;
@@ -605,8 +813,29 @@ async function poll() {
     renderRecentPosts();
     updateSourceFacts(snapshot, posts);
     renderAlerts();
-    setSourceState(`已读取 ${posts.length} 条 Tibo 动态`, "ok");
-    setError();
+    renderResetCalendar(snapshot.reset_calendar);
+    const warning = Array.isArray(snapshot.source_warnings) && snapshot.source_warnings.length > 0;
+    setSourceState(`已综合 ${posts.length} 条动态，含 ${snapshot.reset_signals?.length || 0} 条订阅依据`, warning ? "warning" : "ok");
+    setError(Array.isArray(snapshot.source_warnings) ? snapshot.source_warnings.join(" ") : "");
+
+    enrichReplyContexts(posts).then(() => {
+      if (state.posts !== posts) return;
+      updateLatest(posts);
+      renderRecentPosts();
+      renderAlerts();
+    }).catch(() => console.warn("reply_context_refresh_failed"));
+
+    // 新增订阅渠道首次成功时静默建立基线，已有用户也不补发频道里的旧消息。
+    if (!state.aggregationPrimed && snapshot.source === "combined-public") {
+      alerts.forEach((alert) => state.seen.add(alert.key));
+      state.aggregationPrimed = true;
+      saveStoredState();
+    }
+    if (!state.subscriptionPrimed && ["ok", "cached"].includes(snapshot.signal_source?.status)) {
+      alerts.filter((alert) => alert.thirdParty).forEach((alert) => state.seen.add(alert.key));
+      state.subscriptionPrimed = true;
+      saveStoredState();
+    }
 
     if (!state.primed) {
       alerts.forEach((alert) => state.seen.add(alert.key));
@@ -645,6 +874,10 @@ function bind() {
   readStoredState();
   updateNotificationButton();
   renderPostFilters();
+  refs.calendarGrid?.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-date]");
+    if (button) selectCalendarDate(button.dataset.date);
+  });
   refs.postFilters.addEventListener("click", (event) => {
     const button = event.target.closest("button[data-filter]");
     if (!button) return;
